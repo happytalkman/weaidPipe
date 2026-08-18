@@ -1,4 +1,4 @@
-# WEAID (구 JARVIS-OS-V.2)
+# WEAID "자기진화형 AI 음성 비서 (SKD 온톨로지 + 헌법적 AI + 자가진화 엔진)"
 
 **WEAID**는 로컬에서 동작하는 AI 음성 비서입니다. 대화를 실시간으로 **SKD 3계층
 (시멘틱/키네틱/다이나믹) 온톨로지 지식그래프**로 축적하고, **헌법적 AI
@@ -139,4 +139,4 @@ python -m unittest tests.test_scheduler tests.test_proactive tests.test_diagnosi
 
 ## 📄 라이선스
 
-MIT — 원 저장소 [MAL19INDUSTRIES/JARVIS-OS-V.2](https://github.com/MAL19INDUSTRIES/JARVIS-OS-V.2) 기반.
+MIT
