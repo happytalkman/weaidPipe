@@ -91,3 +91,12 @@ outputs/
 *.codex_*_working
 tutorial_overlay.py.before_remove
 *.before_tutorial_overlay
+
+# ── WEAID 대화 데이터 / 파생물 (개인 대화 내용 — public 레포 금지) ──
+memory/conversation_graph.json
+memory/sessions/
+memory/constitution_evolution.json
+exports/
+
+# Next.js 자동 생성 에이전트 가이드
+web/AGENTS.md

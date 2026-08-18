@@ -25,8 +25,8 @@ from PyQt6.QtGui import (
     QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QCheckBox, QFormLayout, QFrame, QGraphicsOpacityEffect,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QPushButton,
+    QApplication, QComboBox, QCheckBox, QDockWidget, QFormLayout, QFrame, QGraphicsOpacityEffect,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QSystemTrayIcon, QTextEdit,
     QVBoxLayout, QWidget, QProgressBar,
 )
@@ -131,6 +131,21 @@ VOICE_OPTIONS = [
 ]
 VOICE_VALUE_TO_LABEL = {value: label for label, value in VOICE_OPTIONS}
 VOICE_LABEL_TO_VALUE = {label.lower(): value for label, value in VOICE_OPTIONS}
+
+# Assistant speaker prefixes used in the log. The legacy "jarvis:" prefix is
+# kept so older log lines still parse, while "aid:" and "aesuni:" are the
+# rebranded gender-matched speaker names.
+_AI_SPEAKER_PREFIXES = ("aid:", "aesuni:", "jarvis:")
+
+
+def _match_ai_prefix(text: str) -> tuple[str, str] | None:
+    """If *text* begins with an AI speaker prefix, return (name, remainder)."""
+    raw = str(text or "")
+    lower = raw.lower()
+    for prefix in _AI_SPEAKER_PREFIXES:
+        if lower.startswith(prefix):
+            return raw[: len(prefix) - 1], raw[len(prefix):]
+    return None
 
 _DEFAULT_W, _DEFAULT_H = 1280, 820
 _MIN_W,     _MIN_H     = 1100, 700
@@ -247,6 +262,12 @@ class C:
 
 def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
+
+
+def _rgba(h: str, a: float = 0.55) -> str:
+    """hex 색상 → CSS rgba() 문자열 (글래스모피즘용 반투명 배경)."""
+    c = QColor(h)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{a})"
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +510,7 @@ class ChatBubbleWidget(QWidget):
         ib_lay.setSpacing(6)
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Type a message to JARVIS…")
+        self._input.setPlaceholderText("Type a message to AID…")
         self._input.setFont(QFont(UI_FONT, 10))
         self._input.setFixedHeight(32)
         self._input.setStyleSheet(f"""
@@ -574,7 +595,7 @@ class ChatBubbleWidget(QWidget):
                 item.widget().hide()
                 item.widget().deleteLater()
         self._messages.clear()
-        prefixes = {"user": "You: ", "ai": "JARVIS: ", "file": "FILE: ", "error": "ERR: ", "sys": "SYS: "}
+        prefixes = {"user": "You: ", "ai": "AID: ", "file": "FILE: ", "error": "ERR: ", "sys": "SYS: "}
         for message in saved_messages:
             self._skip_typing = True
             self._on_message(prefixes.get(message["sender"], "SYS: ") + message["text"])
@@ -592,7 +613,7 @@ class ChatBubbleWidget(QWidget):
             self._skip_typing = True
             self._on_message(self._typing_full)
             return
-        partial = 'JARVIS: ' + self._typing_body[:self._typing_idx]
+        partial = 'AID: ' + self._typing_body[:self._typing_idx]
         if hasattr(self, '_typing_bubble') and self._typing_bubble:
             self._c_lay.removeWidget(self._typing_bubble)
             self._typing_bubble.deleteLater()
@@ -617,9 +638,10 @@ class ChatBubbleWidget(QWidget):
         self._sig.emit(text)
 
     def _on_message(self, text: str):
-        # Typing animation for JARVIS messages
-        if text.lower().startswith('jarvis:') and not getattr(self, '_skip_typing', False):
-            body = text[7:].strip()
+        # Typing animation for assistant messages
+        _ai = _match_ai_prefix(text)
+        if _ai and not getattr(self, '_skip_typing', False):
+            body = _ai[1].strip()
             self._typing_idx = 0
             self._typing_body = body
             self._typing_full = text
@@ -642,14 +664,14 @@ class ChatBubbleWidget(QWidget):
             border_col = C.PRI_DIM
             text_col = C.WHITE
             name = "YOU"
-        elif tl.startswith("jarvis:"):
+        elif (m := _match_ai_prefix(text)):
             sender = "ai"
-            display = text[7:].strip()
+            display = m[1].strip()
             align = Qt.AlignmentFlag.AlignLeft
             bg_col = C.PRI_GHO
             border_col = C.PRI
             text_col = C.PRI
-            name = "JARVIS"
+            name = m[0].upper() or "AID"
         elif tl.startswith("file:"):
             sender = "file"
             display = text[5:].strip()
@@ -787,7 +809,7 @@ class FocusDialogueWidget(QWidget):
 
         message_row = QHBoxLayout()
         message_row.setSpacing(10)
-        self._speaker_lbl = QLabel("JARVIS")
+        self._speaker_lbl = QLabel("AID")
         self._speaker_lbl.setFixedWidth(62)
         self._speaker_lbl.setFont(QFont(DISPLAY_FONT, 8, QFont.Weight.DemiBold))
         message_row.addWidget(self._speaker_lbl, alignment=Qt.AlignmentFlag.AlignTop)
@@ -801,7 +823,7 @@ class FocusDialogueWidget(QWidget):
         input_row = QHBoxLayout()
         input_row.setSpacing(7)
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Give JARVIS a command")
+        self._input.setPlaceholderText("Give AID a command")
         self._input.setFont(QFont(UI_FONT, 9))
         self._input.setFixedHeight(30)
         self._input.returnPressed.connect(self._submit)
@@ -829,8 +851,8 @@ class FocusDialogueWidget(QWidget):
         lower = clean.lower()
         if lower.startswith("you:"):
             speaker, body, color = "YOU", clean[4:].strip(), C.WHITE
-        elif lower.startswith("jarvis:"):
-            speaker, body, color = "JARVIS", clean[7:].strip(), C.PRI
+        elif (m := _match_ai_prefix(clean)):
+            speaker, body, color = (m[0].upper() or "AID"), m[1].strip(), C.PRI
         elif lower.startswith("err:") or "error" in lower:
             speaker, body, color = "ALERT", clean.replace("ERR:", "").strip(), C.RED
         else:
@@ -2252,6 +2274,13 @@ class HudCanvas(QWidget):
         self._face_px = None
         self._load_face(face_path)
 
+        # ── S-P-O 우주 문자 조립 애니메이션 ──────────────────────────────
+        self._spo_chars: list[dict] = []
+        self._spo_label = ""
+        self._spo_label_color = "#4dabf7"
+        self._spo_mode = "stream"
+        self._spo_font_cache: dict[float, QFont] = {}
+
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self.set_graphics_quality(get_graphics_quality())
@@ -2287,6 +2316,91 @@ class HudCanvas(QWidget):
             self._face_px = px
         except Exception:
             self._face_px = None
+
+    # ── S-P-O 우주 문자 조립 ────────────────────────────────────────────
+    def set_spo_text(self, text: str):
+        """스트리밍 전사를 우주 문자 조립 애니메이션으로 표시한다."""
+        text = str(text or "").strip()
+        if not text:
+            return
+        self._spo_mode = "stream"
+        self._spo_label = ""
+        self._assemble_spo(text[-84:])
+
+    def set_spo_triples(self, triples: list):
+        """인사이트 S-P-O 트리플을 구조화된 조립 애니메이션으로 표시한다."""
+        triples = triples or []
+        if not triples:
+            return
+        t = triples[-1]
+        s = str(t.get("subject", "")).strip()
+        pr = str(t.get("predicate", "")).strip()
+        o = str(t.get("object", "")).strip()
+        layer = str(t.get("layer", "semantic")).lower()
+        color = {"semantic": "#4dabf7", "kinetic": "#ffb454", "dynamic": "#51cf66"}.get(layer, "#4dabf7")
+        self._spo_mode = "spo"
+        self._spo_label = {
+            "semantic": "SEMANTIC · 무엇인가",
+            "kinetic": "KINETIC · 무엇을 하는가",
+            "dynamic": "DYNAMIC · 어떻게 변하는가",
+        }.get(layer, "")
+        self._spo_label_color = color
+        segs: list[tuple[str, str]] = []
+        for ch in s[:12]:
+            segs.append((ch, "#7ee0ff"))
+        segs.append((" → ", color))
+        for ch in pr[:12]:
+            segs.append((ch, color))
+        segs.append((" → ", "#8b9bc0"))
+        for ch in o[:18]:
+            segs.append((ch, "#eaf0ff"))
+        self._spawn_spo_segments(segs)
+
+    def _assemble_spo(self, text: str):
+        """텍스트를 최대 2줄로 배치하고 조립을 시작한다."""
+        max_chars = 20
+        lines = [text[i:i + max_chars] for i in range(0, len(text), max_chars)][-2:]
+        segs: list[tuple[str, str]] = []
+        for li, line in enumerate(lines):
+            for ch in line:
+                if ch == " ":
+                    segs.append(("·", "#46557a"))
+                else:
+                    segs.append((ch, "#cfe2ff"))
+        self._spawn_spo_segments(segs)
+
+    def _spawn_spo_segments(self, segs: list[tuple[str, str]]):
+        """목표 위치를 계산하고, 새 문자는 우주에서 날아오게 스폰한다."""
+        max_chars = 22
+        lines = [segs[i:i + max_chars] for i in range(0, len(segs), max_chars)][-2:]
+        targets: list[tuple[str, float, float, str]] = []
+        for li, line in enumerate(lines):
+            n = len(line)
+            y_off = (li - (len(lines) - 1) / 2) * 0.085
+            for i, (ch, color) in enumerate(line):
+                tx = (i - (n - 1) / 2) * 0.047
+                targets.append((ch, tx, y_off, color))
+        for i, (ch, tx, ty, color) in enumerate(targets):
+            if i >= len(self._spo_chars):
+                ang = random.uniform(0, 2 * math.pi)
+                dist = random.uniform(0.5, 0.8)
+                self._spo_chars.append({
+                    "ch": ch, "color": color,
+                    "x": math.cos(ang) * dist, "y": math.sin(ang) * dist, "z": 0.3,
+                    "tx": tx, "ty": ty,
+                    "size": random.uniform(0.05, 0.062),
+                    "born": self._tick,
+                    "delay": random.uniform(0.0, 1.4),
+                    "ease": random.uniform(0.04, 0.085),
+                    "phase": random.uniform(0, 6.283),
+                })
+            else:
+                c = self._spo_chars[i]
+                c["tx"], c["ty"], c["color"] = tx, ty, color
+                if c["ch"] != ch:
+                    c["ch"] = ch
+        del self._spo_chars[len(targets):]
+        self.update()
 
     def _step(self):
         self._tick += 1
@@ -2365,6 +2479,19 @@ class HudCanvas(QWidget):
         if self._blink_tick >= 32:
             self._blink = not self._blink
             self._blink_tick = 0
+
+        # ── S-P-O 문자 조립 업데이트: 우주에서 날아와 문장으로 정렬 ──
+        for c in self._spo_chars:
+            age = self._tick - c["born"]
+            if age < c["delay"]:
+                continue
+            e = c["ease"]
+            c["x"] += (c["tx"] - c["x"]) * e
+            c["y"] += (c["ty"] - c["y"]) * e
+            c["z"] += (1.0 - c["z"]) * e * 1.4
+            # 조립 후에도 미세하게 부유
+            c["x"] += math.sin(self._tick * 0.02 + c["phase"]) * 0.0007
+            c["y"] += math.cos(self._tick * 0.017 + c["phase"]) * 0.0005
         self.update()
 
     def _proj(self, r, theta, phi, sr, cx, cy):
@@ -3120,6 +3247,37 @@ class HudCanvas(QWidget):
             _ny = random.randint(0, H)
             _ns = random.uniform(0.3, 1.0)
             p.fillRect(QRectF(_nx, _ny, _ns, _ns), qcol(C.PRI, _n_a))
+
+        # ═══ LAYER 16: S-P-O 우주 문자 조립 ═══════════════════════════════
+        if self._spo_chars:
+            if self._spo_label:
+                p.setFont(QFont(UI_FONT, max(7, int(fw * 0.03)), QFont.Weight.DemiBold))
+                p.setPen(QPen(qcol(self._spo_label_color, 230), 1))
+                p.drawText(
+                    QRectF(cx - fw * 0.38, cy - fw * 0.17, fw * 0.76, fw * 0.055),
+                    Qt.AlignmentFlag.AlignCenter, self._spo_label,
+                )
+            for c in self._spo_chars:
+                age = self._tick - c["born"]
+                if age < c["delay"]:
+                    continue
+                z = max(0.22, c["z"])
+                size = c["size"] * fw * z
+                px2 = cx + c["x"] * fw
+                py2 = cy + c["y"] * fw
+                a = int(70 + 185 * z)
+                key = round(size, 1)
+                font = self._spo_font_cache.get(key)
+                if font is None:
+                    font = QFont(UI_FONT, max(6, int(size)), QFont.Weight.DemiBold)
+                    self._spo_font_cache[key] = font
+                p.setFont(font)
+                # 글로우 (뒤)
+                p.setPen(QPen(qcol(C.PRI, int(a * 0.3)), 1))
+                p.drawText(QPointF(px2 - size * 0.42 + 0.8, py2 + size * 0.42 + 0.8), c["ch"])
+                # 본문 (앞)
+                p.setPen(QPen(qcol(c["color"], a), 1))
+                p.drawText(QPointF(px2 - size * 0.42, py2 + size * 0.42), c["ch"])
 
 
 class MetricBar(QWidget):
@@ -4377,7 +4535,7 @@ class LogWidget(QTextEdit):
         self._pos    = 0
         tl = self._text.lower()
         if   tl.startswith("you:"):    self._tag = "you"
-        elif tl.startswith("jarvis:"): self._tag = "ai"
+        elif _match_ai_prefix(tl):     self._tag = "ai"
         elif tl.startswith("file:"):   self._tag = "file"
         elif "err" in tl:              self._tag = "err"
         else:                          self._tag = "sys"
@@ -4503,7 +4661,7 @@ class FileDropZone(QWidget):
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a file for JARVIS", str(Path.home()),
+            self, "Select a file for AID", str(Path.home()),
             "All Files (*.*);;"
             "Images (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg);;"
             "Documents (*.pdf *.docx *.txt *.md *.pptx);;"
@@ -4625,6 +4783,120 @@ class _DropCanvas(QWidget):
             z.mousePressEvent(e)
 
 
+# ---------------------------------------------------------------------------
+# CommandPaletteOverlay — Ctrl+K 명령 팔레트 (글래스 스타일)
+# ---------------------------------------------------------------------------
+
+class CommandPaletteOverlay(QWidget):
+    """Ctrl+K 로 여는 명령 팔레트 — 모든 기능을 키보드로 검색·실행."""
+
+    def __init__(self, parent: QWidget, commands: list):
+        super().__init__(parent)
+        self._commands = commands  # [(이름, 설명, callable)]
+        self.setObjectName("commandPalette")
+        self.setFixedSize(540, 430)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(9)
+
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("명령 검색…  (마인드맵 · 온톨로지 · 헌법 · 테마 · 종료…)")
+        self._input.setFont(QFont(UI_FONT, 11))
+        self._input.setStyleSheet(f"""
+            QLineEdit {{
+                background: {_rgba(C.DARK, .8)};
+                color: {C.WHITE};
+                border: 1px solid {C.PRI_DIM};
+                border-radius: 11px;
+                padding: 10px 14px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {C.ACC2}; }}
+        """)
+        self._input.textChanged.connect(self._filter)
+        lay.addWidget(self._input)
+
+        self._list = QListWidget()
+        self._list.setStyleSheet(f"""
+            QListWidget {{
+                background: {_rgba(C.DARK, .8)};
+                border: 1px solid {C.BORDER_B};
+                border-radius: 11px;
+                padding: 5px;
+            }}
+            QListWidget::item {{
+                color: {C.TEXT};
+                padding: 9px 12px;
+                border-radius: 8px;
+                margin: 2px 0;
+            }}
+            QListWidget::item:hover {{ background: {_rgba(C.PRI, .12)}; }}
+            QListWidget::item:selected {{ background: {_rgba(C.PRI, .25)}; color: {C.WHITE}; }}
+        """)
+        self._list.itemActivated.connect(self._execute)
+        self._list.itemClicked.connect(self._execute)
+        lay.addWidget(self._list)
+
+        self.setStyleSheet(f"""
+            QWidget#commandPalette {{
+                background: {_rgba(C.BG, .78)};
+                border: 1px solid {C.BORDER_B};
+                border-radius: 16px;
+            }}
+        """)
+        self._refresh()
+
+    def open_palette(self):
+        self._input.clear()
+        self._refresh()
+        self.show()
+        self.raise_()
+        self._input.setFocus()
+        cw = self.parentWidget()
+        if cw:
+            self.move((cw.width() - self.width()) // 2, int(cw.height() * 0.16))
+
+    def _refresh(self):
+        self._list.clear()
+        for name, desc, _fn in self._commands:
+            item = QListWidgetItem(f"{name}    ·    {desc}")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self._list.addItem(item)
+
+    def _filter(self, text: str):
+        t = (text or "").strip().lower()
+        self._list.clear()
+        for name, desc, _fn in self._commands:
+            if not t or t in name.lower() or t in desc.lower():
+                item = QListWidgetItem(f"{name}    ·    {desc}")
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                self._list.addItem(item)
+        if self._list.count():
+            self._list.setCurrentRow(0)
+
+    def _execute(self, item):
+        name = item.data(Qt.ItemDataRole.UserRole)
+        self.hide()
+        for n, _d, fn in self._commands:
+            if n == name and callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+                break
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            item = self._list.currentItem()
+            if item is not None:
+                self._execute(item)
+            return
+        super().keyPressEvent(event)
+
+
 class SetupOverlay(QWidget):
     done = pyqtSignal(str, str, bool)
     validation_finished = pyqtSignal(bool, str, str, bool)
@@ -4682,7 +4954,7 @@ class SetupOverlay(QWidget):
                                align=Qt.AlignmentFlag.AlignLeft))
         self._key_input = QLineEdit()
         self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key_input.setPlaceholderText("Paste Gemini API key")
+        self._key_input.setPlaceholderText("Paste WEAID key")
         self._key_input.setFont(QFont("Courier New", 10))
         self._key_input.setFixedHeight(32)
         self._key_input.setStyleSheet(f"""
@@ -4694,7 +4966,7 @@ class SetupOverlay(QWidget):
         """)
         layout.addWidget(self._key_input)
 
-        self._validation_lbl = QLabel("Only a verified Gemini key will be accepted.")
+        self._validation_lbl = QLabel("Only a verified WEAID key will be accepted.")
         self._validation_lbl.setWordWrap(True)
         self._validation_lbl.setFont(QFont("Arial", 8))
         self._validation_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
@@ -4838,8 +5110,8 @@ class SetupOverlay(QWidget):
         self._validation_pending = True
         self._purge_saved_on_failure = purge_saved_on_failure
         self._init_btn.setEnabled(False)
-        self._init_btn.setText("VERIFYING WITH GEMINI…")
-        self._validation_lbl.setText("Contacting Gemini. The key will not be saved unless verification succeeds.")
+        self._init_btn.setText("VERIFYING WITH WEAID…")
+        self._validation_lbl.setText("Contacting WEAID. The key will not be saved unless verification succeeds.")
         self._validation_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
 
         def _validate():
@@ -4869,7 +5141,7 @@ class SetupOverlay(QWidget):
             self._key_input.setFocus()
             return
 
-        self._validation_lbl.setText("Gemini key verified.")
+        self._validation_lbl.setText("WEAID key verified.")
         self._validation_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
         self._verified_key = key
         self.done.emit(key, self._sel_os, remember_key)
@@ -5431,7 +5703,7 @@ class NameSignInOverlay(_OverlayBase):
             return w
 
         title_txt = "◈  UPDATE IDENTITY" if existing_name else "◈  IDENTITY PROTOCOL"
-        sub_txt   = f"Currently: {existing_name}" if existing_name else "JARVIS needs to know who it's talking to."
+        sub_txt   = f"Currently: {existing_name}" if existing_name else "AID needs to know who it's talking to."
         layout.addWidget(_lbl(title_txt, 13, True))
         layout.addWidget(_lbl(sub_txt, 9, color=C.PRI_DIM))
         layout.addSpacing(4)
@@ -5542,7 +5814,7 @@ class VoiceSelectOverlay(_OverlayBase):
             return w
 
         layout.addWidget(_lbl("◈  VOICE SELECTION", 13, True))
-        layout.addWidget(_lbl("Choose the voice JARVIS will speak with.", 9, color=C.PRI_DIM))
+        layout.addWidget(_lbl("Choose the voice AID will speak with.", 9, color=C.PRI_DIM))
         layout.addSpacing(4)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -5782,7 +6054,7 @@ class VoiceSelectorOverlay(_OverlayBase):
             return w
 
         main_lay.addWidget(_lbl("◈  SELECT VOICE", 13, True))
-        main_lay.addWidget(_lbl("Default: Orus  ·  Gemini", 8, color=C.PRI_DIM))
+        main_lay.addWidget(_lbl("Default: Orus  ·  WEAID", 8, color=C.PRI_DIM))
         main_lay.addSpacing(2)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -5792,7 +6064,7 @@ class VoiceSelectorOverlay(_OverlayBase):
         self._voice_btns: dict[tuple[str, str], QPushButton] = {}
 
         SECTION_LABELS = {
-            "gemini":     "── GEMINI ──",
+            "gemini":     "── WEAID ──",
         }
         SECTION_COLORS = {
             "gemini":     C.ENERGY,
@@ -6307,7 +6579,7 @@ class VisionPreviewWindow(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setObjectName("visionPreview")
-        self.setAccessibleName("JARVIS live vision preview")
+        self.setAccessibleName("AID live vision preview")
         self.setFixedSize(360, 248)
         self._source = "screen"
         self._drag_origin_global = None
@@ -6585,6 +6857,8 @@ class MainWindow(QMainWindow):
     _sub_sig       = pyqtSignal(str)
     _sub_clear_sig = pyqtSignal()
     _sub_hold_sig  = pyqtSignal()
+    _mindmap_ready_sig = pyqtSignal()
+    _constitution_review_sig = pyqtSignal(dict)
     _mode_sig      = pyqtSignal(str)          # context mode for AIActivityCanvas
     _task_sig      = pyqtSignal(str, str)     # (task_name, status) for TaskQueueWidget
     _tool_sig      = pyqtSignal(str)          # tool log line for ToolLogWidget
@@ -6612,7 +6886,7 @@ class MainWindow(QMainWindow):
     def __init__(self, face_path: str):
         super().__init__()
         _load_bundled_fonts()
-        self.setWindowTitle("J.A.R.V.I.S — MARK XXXIX")
+        self.setWindowTitle("AID · WEAID")
         self.setMinimumSize(_MIN_W, _MIN_H)
 
         # Set dark palette so no white leaks through any unstyled widget
@@ -6646,7 +6920,19 @@ class MainWindow(QMainWindow):
         self.on_name_change         = None
         self.on_tts_provider_change = None
         self.on_quit_requested      = None
+        self.on_wake_requested      = None
         self._muted                 = False
+        self._last_question          = ""
+        self._last_answer            = ""
+        self._mindmap_dock           = None
+        self._mindmap_view           = None
+        self._mindmap_data           = None
+        self._mindmap_mode           = "mindmap"
+        self._mindmap_proc           = None
+        self._mindmap_pending        = None
+        self._constitution_review    = None
+        self._constitution_panel     = None
+        self._command_palette        = None
         self._current_file: str | None = None
         self._tts_overlay: TTSProviderOverlay | None = None
         self._compact_mode          = False
@@ -6782,6 +7068,7 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self._constitution_review_sig.connect(self._on_constitution_review)
         self._voice_sig.connect(self._sync_voice_combo)
         self._sub_sig.connect(self._subtitle.set_text)
         self._sub_clear_sig.connect(self._subtitle.clear_subtitle)
@@ -6883,6 +7170,14 @@ class MainWindow(QMainWindow):
         sc_command.activated.connect(
             lambda: self._set_command_center(not self._command_center_open)
         )
+        sc_mindmap = QShortcut(QKeySequence("Ctrl+Shift+M"), self)
+        sc_mindmap.activated.connect(self._toggle_mindmap)
+        sc_graph = QShortcut(QKeySequence("Ctrl+Shift+G"), self)
+        sc_graph.activated.connect(self._toggle_graph)
+        sc_palette = QShortcut(QKeySequence("Ctrl+K"), self)
+        sc_palette.activated.connect(self._toggle_command_palette)
+        sc_wake = QShortcut(QKeySequence("Ctrl+W"), self)
+        sc_wake.activated.connect(self._request_wake)
         sc_esc = QShortcut(QKeySequence("Escape"), self)
         sc_esc.activated.connect(self._dismiss_overlays)
 
@@ -6902,7 +7197,7 @@ class MainWindow(QMainWindow):
                     self._vision_preview.stop()
                 self.hide()
                 self._tray.showMessage(
-                    "JARVIS", "Running in background. Click tray icon to restore.",
+                    "AID", "Running in background. Click tray icon to restore.",
                     QSystemTrayIcon.MessageIcon.Information, 2000
                 )
                 return
@@ -6930,7 +7225,7 @@ class MainWindow(QMainWindow):
         p.drawEllipse(10, 10, 12, 12)
         p.end()
         self._tray.setIcon(QIcon(px))
-        self._tray.setToolTip("J.A.R.V.I.S — MARK XXXIX")
+        self._tray.setToolTip("AID · WEAID")
 
         tray_menu = QMenu()
         tray_menu.setStyleSheet(f"""
@@ -6941,7 +7236,7 @@ class MainWindow(QMainWindow):
             QMenu::item:selected {{ background: {C.PRI_GHO}; color: {C.PRI}; }}
         """)
 
-        show_action = QAction("Show JARVIS", self)
+        show_action = QAction("Show AID", self)
         show_action.triggered.connect(self._tray_show)
         tray_menu.addAction(show_action)
 
@@ -6951,7 +7246,7 @@ class MainWindow(QMainWindow):
 
         tray_menu.addSeparator()
 
-        quit_action = QAction("Quit JARVIS", self)
+        quit_action = QAction("Quit AID", self)
         quit_action.triggered.connect(self._tray_quit)
         tray_menu.addAction(quit_action)
 
@@ -7214,7 +7509,7 @@ class MainWindow(QMainWindow):
 
     def _handle_ui_command(self, action: str):
         action = str(action or "").strip().lower()
-        if action in {"quit jarvis", "quit_jarvis"}:
+        if action in {"quit jarvis", "quit_jarvis", "quit aid", "quit aesuni"}:
             self._request_quit()
             return True
         if action == "open_command_center":
@@ -7334,7 +7629,7 @@ class MainWindow(QMainWindow):
             )
             threading.Thread(target=self.on_text_command, args=(prompt,), daemon=True).start()
         else:
-            self._log.append_log(f"JARVIS: {announcement}")
+            self._log.append_log(f"AID: {announcement}")
 
 
     def _toggle_left_panel(self):
@@ -7616,7 +7911,7 @@ class MainWindow(QMainWindow):
         button.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; color: {color};
-                border: 1px solid transparent; border-radius: 5px;
+                border: 1px solid transparent; border-radius: 10px;
                 padding: 0 11px;
             }}
             QPushButton:hover {{
@@ -7635,14 +7930,15 @@ class MainWindow(QMainWindow):
         if rail is not None:
             rail.setStyleSheet(f"""
                 QWidget#JarvisCommandRail {{
-                    background: {C.BAR_BG};
+                    background: {_rgba(C.BAR_BG, .62)};
                     border-top: 1px solid {C.BORDER_B};
                     border-bottom: 1px solid {C.BORDER};
+                    border-radius: 12px;
                 }}
                 QFrame#CommandControlTrack {{
-                    background: {C.PANEL2};
+                    background: {_rgba(C.PANEL2, .5)};
                     border: 1px solid {C.BORDER};
-                    border-radius: 6px;
+                    border-radius: 12px;
                 }}
                 QFrame#CommandRailDivider {{
                     color: {C.BORDER};
@@ -7650,6 +7946,16 @@ class MainWindow(QMainWindow):
                     border: none;
                 }}
             """)
+            if not getattr(self, "_rail_shadow_set", False):
+                try:
+                    _eff = QGraphicsDropShadowEffect(rail)
+                    _eff.setBlurRadius(26)
+                    _eff.setOffset(0, -3)
+                    _eff.setColor(QColor(0, 0, 0, 130))
+                    rail.setGraphicsEffect(_eff)
+                    self._rail_shadow_set = True
+                except Exception:
+                    pass
         if hasattr(self, "_rail_divider"):
             self._rail_divider.setStyleSheet(f"color: {C.BORDER_B};")
         if hasattr(self, "_command_title_lbl"):
@@ -7690,7 +7996,7 @@ class MainWindow(QMainWindow):
             self._quit_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent; color: {C.RED};
-                    border: 1px solid {C.RED_D}; border-radius: 5px;
+                    border: 1px solid {C.RED_D}; border-radius: 10px;
                     padding: 0 13px;
                 }}
                 QPushButton:hover, QPushButton:focus {{
@@ -7700,6 +8006,26 @@ class MainWindow(QMainWindow):
             """)
         if hasattr(self, "_mute_btn"):
             self._style_mute_btn()
+        # MINDMAP / ONTOLOGY / CONSTITUTION share the same green pill style as MIC.
+        for _btn in (
+            getattr(self, "_mindmap_btn", None),
+            getattr(self, "_graph_btn", None),
+            getattr(self, "_constitution_btn", None),
+        ):
+            if _btn is not None:
+                _btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {_rgba(C.GREEN_BG, .55)};
+                        color: {C.GREEN};
+                        border: 1px solid {C.GREEN_D};
+                        border-radius: 10px;
+                        padding: 0 12px;
+                    }}
+                    QPushButton:hover {{
+                        background: {C.DARK2};
+                        border: 1px solid {C.GREEN};
+                    }}
+                """)
 
     def _update_theme_btn(self):
         if hasattr(self, "_theme_btn"):
@@ -7724,14 +8050,14 @@ class MainWindow(QMainWindow):
         left_col = QVBoxLayout(); left_col.setSpacing(1)
         left_col.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        stark = QLabel("JARVIS")
+        stark = QLabel("AID")
         self._header_brand_lbl = stark
         stark.setObjectName("headerTitle")
         stark.setFont(QFont("Arial", 15, QFont.Weight.DemiBold))
         stark.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
         left_col.addWidget(stark)
 
-        sub_stark = QLabel("MARK XXXIX")
+        sub_stark = QLabel("WEAID")
         self._header_mark_lbl = sub_stark
         sub_stark.setObjectName("headerMeta")
         sub_stark.setFont(QFont("Arial", 7, QFont.Weight.Medium))
@@ -8092,7 +8418,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         self._dock_frame = w
         w.setObjectName("JarvisCommandRail")
-        w.setAccessibleName("JARVIS command rail")
+        w.setAccessibleName("AID command rail")
         w.setFixedHeight(72)
         lay = QHBoxLayout(w)
         lay.setContentsMargins(14, 8, 14, 8)
@@ -8111,7 +8437,7 @@ class MainWindow(QMainWindow):
         title_row.setSpacing(7)
         self._rail_status_dot = QLabel("●")
         self._rail_status_dot.setFont(QFont(TECH_FONT, 7, QFont.Weight.Medium))
-        self._rail_status_dot.setAccessibleName("JARVIS status indicator")
+        self._rail_status_dot.setAccessibleName("AID status indicator")
         title_row.addWidget(self._rail_status_dot)
         self._command_title_lbl = QLabel("COMMAND RAIL")
         self._command_title_lbl.setFont(QFont(UI_FONT, 9, QFont.Weight.DemiBold))
@@ -8121,7 +8447,7 @@ class MainWindow(QMainWindow):
 
         self._rail_mode_lbl = QLabel("LOCAL  /  LISTENING")
         self._rail_mode_lbl.setFont(QFont(TECH_FONT, 7, QFont.Weight.Medium))
-        self._rail_mode_lbl.setAccessibleName("JARVIS current state")
+        self._rail_mode_lbl.setAccessibleName("AID current state")
         anchor_lay.addWidget(self._rail_mode_lbl)
         lay.addWidget(anchor)
 
@@ -8168,8 +8494,8 @@ class MainWindow(QMainWindow):
         track_lay.addWidget(_track_separator())
 
         self._tts_btn = _ctrl_btn("VOICE", 142)
-        self._tts_btn.setToolTip("Change JARVIS voice")
-        self._tts_btn.setAccessibleName("Change JARVIS voice")
+        self._tts_btn.setToolTip("Change AID voice")
+        self._tts_btn.setAccessibleName("Change AID voice")
         self._tts_btn.clicked.connect(self._show_tts_select)
         self._update_tts_btn()
         track_lay.addWidget(self._tts_btn)
@@ -8185,10 +8511,31 @@ class MainWindow(QMainWindow):
 
         # Theme cycle button
         self._theme_btn = _ctrl_btn("THEME", 176)
-        self._theme_btn.setToolTip("Cycle JARVIS theme")
-        self._theme_btn.setAccessibleName("Cycle JARVIS theme")
+        self._theme_btn.setToolTip("Cycle theme")
+        self._theme_btn.setAccessibleName("Cycle theme")
         self._theme_btn.clicked.connect(self._cycle_theme)
         track_lay.addWidget(self._theme_btn)
+        track_lay.addWidget(_track_separator())
+
+        self._mindmap_btn = _ctrl_btn("MINDMAP", 142)
+        self._mindmap_btn.setToolTip("답변을 주제별 마인드맵으로 보기")
+        self._mindmap_btn.setAccessibleName("Show mindmap")
+        self._mindmap_btn.clicked.connect(self._toggle_mindmap)
+        track_lay.addWidget(self._mindmap_btn)
+        track_lay.addWidget(_track_separator())
+
+        self._graph_btn = _ctrl_btn("ONTOLOGY", 160)
+        self._graph_btn.setToolTip("마인드맵에서 추출한 노드/엣지로 온톨로지 보기")
+        self._graph_btn.setAccessibleName("Show ontology")
+        self._graph_btn.clicked.connect(self._toggle_graph)
+        track_lay.addWidget(self._graph_btn)
+        track_lay.addWidget(_track_separator())
+
+        self._constitution_btn = _ctrl_btn("CONSTITUTION", 176)
+        self._constitution_btn.setToolTip("헌법 원칙 검사 결과 보기")
+        self._constitution_btn.setAccessibleName("Show constitution review")
+        self._constitution_btn.clicked.connect(self._toggle_constitution_panel)
+        track_lay.addWidget(self._constitution_btn)
         lay.addWidget(track)
 
         lay.addStretch(1)
@@ -8220,8 +8567,8 @@ class MainWindow(QMainWindow):
 
         self._quit_btn = QPushButton("QUIT")
         self._quit_btn.setObjectName("JarvisQuitButton")
-        self._quit_btn.setAccessibleName("Quit JARVIS")
-        self._quit_btn.setToolTip("Quit JARVIS")
+        self._quit_btn.setAccessibleName("Quit AID")
+        self._quit_btn.setToolTip("Quit AID")
         self._quit_btn.setFixedSize(78, 44)
         self._quit_btn.setFont(QFont(UI_FONT, 8, QFont.Weight.DemiBold))
         self._quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -8237,7 +8584,7 @@ class MainWindow(QMainWindow):
         strip = QWidget()
         self._maker_signature = strip
         strip.setObjectName("JarvisMakerSignature")
-        strip.setAccessibleName("JARVIS creator trademark")
+        strip.setAccessibleName("WEAID creator trademark")
         strip.setFixedHeight(20)
 
         lay = QHBoxLayout(strip)
@@ -8245,13 +8592,13 @@ class MainWindow(QMainWindow):
         lay.setSpacing(0)
         lay.addStretch(1)
 
-        self._maker_signature_lbl = QLabel("amd.creationz™", strip)
+        self._maker_signature_lbl = QLabel("WEAID™ · 창조자 이길환 (HAPPYTALKMAN)", strip)
         self._maker_signature_lbl.setFont(QFont(TECH_FONT, 7, QFont.Weight.Medium))
         self._maker_signature_lbl.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self._maker_signature_lbl.setAccessibleName("amd.creationz trademark")
-        self._maker_signature_lbl.setToolTip("JARVIS interface by amd.creationz")
+        self._maker_signature_lbl.setAccessibleName("WEAID trademark — creator 이길환 HAPPYTALKMAN")
+        self._maker_signature_lbl.setToolTip("WEAID interface · 창조자 이길환 (HAPPYTALKMAN)")
         lay.addWidget(self._maker_signature_lbl)
 
         self._style_maker_signature()
@@ -8332,7 +8679,7 @@ class MainWindow(QMainWindow):
         cat  = _file_category(p)
         icon, _ = _FILE_ICONS.get(cat, _FILE_ICONS["unknown"])
         size = _fmt_size(p.stat().st_size)
-        self._file_hint.setText(f"{icon}  {p.name}  ·  {size}  ·  Tell JARVIS what to do with it")
+        self._file_hint.setText(f"{icon}  {p.name}  ·  {size}  ·  Tell AID what to do with it")
         self._log.append_log(f"FILE: {p.name} ({size}) loaded")
         if self.on_text_command:
             msg = (
@@ -8353,6 +8700,327 @@ class MainWindow(QMainWindow):
         else:
             self._apply_state("LISTENING")
             self._log.append_log("SYS: Microphone active.")
+
+    # ── Mindmap / knowledge graph ─────────────────────────────────────────
+    def set_last_exchange(self, question: str, answer: str):
+        """Record the latest Q&A pair (인사이트 빌드는 main.py가 원콜로 처리)."""
+        self._last_question = str(question or "").strip()
+        self._last_answer = str(answer or "").strip()
+        self._mindmap_data = None
+        self._mindmap_pending = None
+
+    def set_mindmap_data(self, data: dict):
+        """Thread-safe: store built insight data; auto-open the viewer if requested."""
+        self._mindmap_data = data or {}
+        pending = getattr(self, "_mindmap_pending", None)
+        self._mindmap_pending = None
+        if pending:
+            self._log_sig.emit("SYS: 분석 완료 — 뷰어를 자동으로 엽니다.")
+            self._launch_mindmap_viewer(pending)
+
+    def _launch_mindmap_viewer(self, mode: str = "mindmap"):
+        """Open the mindmap / ontology popup in a separate process.
+
+        QtWebEngine hard-crashes the main app on this machine, so the D3.js
+        viewer runs fully isolated. If the viewer ever dies, we fall back to
+        the system browser.
+        """
+        if not getattr(self, "_mindmap_data", None):
+            self._log_sig.emit("SYS: 지식 구조를 분석 중입니다. 잠시 후 다시 눌러주세요.")
+            return
+        try:
+            import subprocess as _sp
+            import tempfile as _tf
+
+            data_file = Path(_tf.gettempdir()) / "weaid_mindmap_data.json"
+            data_file.write_text(
+                json.dumps(self._mindmap_data, ensure_ascii=False), encoding="utf-8"
+            )
+            viewer = BASE_DIR / "scripts" / "mindmap_viewer.py"
+            if not viewer.exists():
+                self._open_mindmap_in_browser(data_file)
+                return
+
+            old = getattr(self, "_mindmap_proc", None)
+            if old is not None and old.poll() is None:
+                try:
+                    old.kill()
+                except Exception:
+                    pass
+
+            flags = (
+                _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
+                if os.name == "nt"
+                else 0
+            )
+            log_path = Path(_tf.gettempdir()) / "weaid_mindmap_viewer.log"
+            log_fh = open(log_path, "w", encoding="utf-8")
+            proc = _sp.Popen(
+                [sys.executable, str(viewer), str(data_file), mode],
+                cwd=str(BASE_DIR),
+                stdout=log_fh,
+                stderr=log_fh,
+                creationflags=flags,
+            )
+            self._mindmap_proc = proc
+            self._log_sig.emit("SYS: 마인드맵/온톨로지 뷰어 창을 열었습니다.")
+
+            def _watchdog():
+                time.sleep(4)
+                if proc.poll() is not None:
+                    self._log_sig.emit("SYS: 뷰어가 종료되어 기본 브라우저로 대체합니다...")
+                    self._open_mindmap_in_browser(data_file)
+
+            threading.Thread(target=_watchdog, daemon=True).start()
+        except Exception as e:
+            self._log_sig.emit(f"SYS: Mindmap viewer failed: {e}")
+
+    def _open_mindmap_in_browser(self, data_file):
+        """Fallback: write a self-contained HTML file and open it in the browser."""
+        try:
+            import tempfile as _tf
+            import webbrowser as _wb
+
+            html_path = BASE_DIR / "web" / "mindmap.html"
+            html = html_path.read_text(encoding="utf-8") if html_path.exists() else "<body></body>"
+            data_js = json.dumps(getattr(self, "_mindmap_data", {}) or {}, ensure_ascii=False)
+            html = html.replace(
+                "window.MINDMAP_DATA = null;",
+                f"window.MINDMAP_DATA = {data_js};",
+            )
+            out = Path(_tf.gettempdir()) / "weaid_mindmap.html"
+            out.write_text(html, encoding="utf-8")
+            _wb.open(out.as_uri())
+            self._log_sig.emit("SYS: 기본 브라우저로 마인드맵을 열었습니다.")
+        except Exception as e:
+            self._log_sig.emit(f"SYS: Browser fallback failed: {e}")
+
+    def _toggle_mindmap(self):
+        if not self._last_answer:
+            self._log.append_log("SYS: 질문을 하면 답변과 함께 마인드맵이 자동 생성됩니다.")
+            return
+        self._mindmap_mode = "mindmap"
+        if not getattr(self, "_mindmap_data", None):
+            # 싱크 보장: 분석 중이면 대기했다가 완료 시 자동으로 연다.
+            self._mindmap_pending = "mindmap"
+            self._log.append_log("SYS: 분석 중... 완료되면 마인드맵이 자동으로 열립니다.")
+            return
+        self._launch_mindmap_viewer("mindmap")
+
+    def _toggle_graph(self):
+        if not self._last_answer:
+            self._log.append_log("SYS: 먼저 질문을 해주세요. 마인드맵이 만들어진 후 온톨로지가 생성됩니다.")
+            return
+        self._mindmap_mode = "graph"
+        if not getattr(self, "_mindmap_data", None):
+            self._mindmap_pending = "graph"
+            self._log.append_log("SYS: 분석 중... 완료되면 온톨로지가 자동으로 열립니다.")
+            return
+        self._launch_mindmap_viewer("graph")
+
+    def _open_graph_viewer(self):
+        """질의 기반 탐색용: 토글 없이 온톨로지 뷰어를 바로 연다."""
+        if not getattr(self, "_mindmap_data", None):
+            self._mindmap_pending = "graph"
+            self._log.append_log("SYS: 분석 중... 완료되면 온톨로지가 자동으로 열립니다.")
+            return
+        self._mindmap_mode = "graph"
+        self._launch_mindmap_viewer("graph")
+
+    # ── Ctrl+K 명령 팔레트 ────────────────────────────────────────────────
+    def _palette_commands(self) -> list:
+        return [
+            ("마인드맵 열기", "대화 흐름 마인드맵 보기", self._toggle_mindmap),
+            ("온톨로지 열기", "SKD 3계층 지식그래프 보기", self._toggle_graph),
+            ("깨우기 (WAKE)", "AID 수동 웨이크업 (Ctrl+W)", self._request_wake),
+            ("헌법 검사 패널", "원칙 준수 점수 확인", self._toggle_constitution_panel),
+            ("마이크 토글", "음소거 / 해제 (F4)", self._toggle_mute),
+            ("테마 변경", "다음 테마로 순환", self._cycle_theme),
+            ("Command Center", "전체 패널 열기/닫기", lambda: self._set_command_center(not self._command_center_open)),
+            ("미니 모드", "컴팩트 모드 전환", self._toggle_compact_mode),
+            ("전체화면", "전체화면 전환 (F11)", self._toggle_fullscreen),
+            ("설정 열기", "설정 패널", self._show_settings),
+            ("단축키 보기", "키보드 단축키 안내", self._toggle_shortcuts_overlay),
+            ("새 대화", "대화 그래프 초기화 (이전 세션 보관)", self._palette_new_session),
+            ("종료", "WEAID 종료", self._request_quit),
+        ]
+
+    def _palette_new_session(self):
+        try:
+            if self.on_text_command:
+                threading.Thread(
+                    target=lambda: self.on_text_command("새 대화"), daemon=True
+                ).start()
+            else:
+                self._log.append_log("SYS: 라이브 세션이 연결된 뒤 사용할 수 있습니다.")
+        except Exception:
+            pass
+
+    def _ensure_command_palette(self):
+        if self._command_palette is None:
+            self._command_palette = CommandPaletteOverlay(self, self._palette_commands())
+        return self._command_palette
+
+    def _toggle_command_palette(self):
+        p = self._ensure_command_palette()
+        if p.isVisible():
+            p.hide()
+        else:
+            p.open_palette()
+
+    def _request_wake(self):
+        """Ctrl+W / 명령 팔레트 수동 웨이크업."""
+        try:
+            if self.on_wake_requested:
+                threading.Thread(target=self.on_wake_requested, daemon=True).start()
+            else:
+                self._log.append_log("SYS: 라이브 세션이 연결된 뒤 웨이크업할 수 있습니다.")
+        except Exception:
+            pass
+
+    # ── 헌법 검사 패널 (Constitutional AI) ────────────────────────────────
+    def _on_constitution_review(self, review: dict):
+        self._constitution_review = review or {}
+        self._update_constitution_panel()
+
+    def _toggle_constitution_panel(self):
+        panel = self._ensure_constitution_panel()
+        if panel.isVisible():
+            panel.hide()
+            return
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+        self._update_constitution_panel()
+
+    def _ensure_constitution_panel(self):
+        if self._constitution_panel is not None:
+            return self._constitution_panel
+        win = QWidget()
+        win.setWindowTitle("WEAID · 헌법 검사 (Constitutional AI)")
+        win.setObjectName("constitutionPanel")
+        win.resize(560, 720)
+        win.setStyleSheet(f"QWidget#constitutionPanel {{ background: {C.BG}; }}")
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        head = QLabel("⚖️  헌법 검사 패널")
+        head.setStyleSheet(
+            f"background:{C.DARK}; color:{C.ACC2}; padding:12px 16px;"
+            f"font-weight:bold; font-size:14px; border-bottom:1px solid {C.BORDER};"
+        )
+        lay.addWidget(head)
+
+        self._const_title_lbl = QLabel("아직 검사 결과가 없습니다. 질문을 해보세요.")
+        self._const_title_lbl.setWordWrap(True)
+        self._const_title_lbl.setStyleSheet(
+            f"color:{C.TEXT_MED}; padding:10px 16px; background:transparent; font-size:13px;"
+        )
+        lay.addWidget(self._const_title_lbl)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        body = QWidget()
+        body.setStyleSheet(f"background: {C.BG};")
+        self._const_body_lay = QVBoxLayout(body)
+        self._const_body_lay.setContentsMargins(14, 10, 14, 10)
+        self._const_body_lay.setSpacing(7)
+        self._const_body_lay.addStretch(1)
+        scroll.setWidget(body)
+        lay.addWidget(scroll, 1)
+
+        self._constitution_panel = win
+        return win
+
+    def _update_constitution_panel(self):
+        win = getattr(self, "_constitution_panel", None)
+        if win is None or not win.isVisible():
+            return
+        lay = self._const_body_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        review = self._constitution_review or {}
+        score = review.get("score")
+        if score is None:
+            self._const_title_lbl.setText("아직 검사 결과가 없습니다. 질문을 해보세요.")
+            lay.addStretch(1)
+            return
+
+        compliant = bool(review.get("compliant", True))
+        score_color = C.GREEN if compliant else (C.ENERGY if score >= 70 else C.RED)
+        self._const_title_lbl.setText(f"마지막 답변 원칙 준수 점수: {score} / 100")
+
+        big = QLabel(f"{score}")
+        big.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        big.setStyleSheet(
+            f"color:{score_color}; font-size:34px; font-weight:bold; background:transparent;"
+        )
+        lay.addWidget(big)
+
+        verdict = QLabel("✅ 원칙 준수" if compliant else "⚠️ 원칙 위반 — 수정 답변 반영됨")
+        verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        verdict.setStyleSheet(f"color:{score_color}; font-size:12px; background:transparent;")
+        lay.addWidget(verdict)
+
+        creator = QLabel("창조자: 이길환 (HAPPYTALKMAN) 님 · 존경을 담아")
+        creator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        creator.setStyleSheet(f"color:{C.PRI_DIM}; font-size:11px; background:transparent;")
+        lay.addWidget(creator)
+        lay.addSpacing(6)
+
+        checks = review.get("checks") or []
+        if checks:
+            sub = QLabel("원칙별 검사")
+            sub.setStyleSheet(f"color:{C.TEXT_DIM}; font-size:11px; background:transparent;")
+            lay.addWidget(sub)
+            from core.constitution import CONSTITUTION
+            title_by_id = {p["id"]: p["title"] for p in CONSTITUTION}
+            for c in checks:
+                cid = c.get("id", "")
+                passed = bool(c.get("pass", True))
+                note = str(c.get("note", "")).strip()
+                mark = "✅" if passed else "❌"
+                row = QLabel(f"{mark}  {title_by_id.get(cid, cid)}")
+                row.setWordWrap(True)
+                row.setStyleSheet(
+                    f"color:{C.GREEN if passed else C.RED}; background:{C.DARK};"
+                    f"border:1px solid {C.BORDER}; border-radius:5px; padding:6px 10px; font-size:12px;"
+                )
+                if note:
+                    row.setText(row.text() + f"\n    └ {note}")
+                lay.addWidget(row)
+
+        issues = review.get("issues") or []
+        if issues:
+            sub = QLabel("발견된 문제")
+            sub.setStyleSheet(f"color:{C.TEXT_DIM}; font-size:11px; background:transparent;")
+            lay.addWidget(sub)
+            for it in issues:
+                lbl = QLabel(f"• {it}")
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet(f"color:{C.RED}; background:transparent; font-size:12px;")
+                lay.addWidget(lbl)
+
+        revised = str(review.get("revised", "")).strip()
+        if revised:
+            sub = QLabel("수정 답변")
+            sub.setStyleSheet(f"color:{C.TEXT_DIM}; font-size:11px; background:transparent;")
+            lay.addWidget(sub)
+            rv = QLabel(revised)
+            rv.setWordWrap(True)
+            rv.setStyleSheet(
+                f"color:{C.TEXT}; background:{C.DARK}; border:1px solid {C.BORDER};"
+                f"border-radius:5px; padding:8px 10px; font-size:12px;"
+            )
+            lay.addWidget(rv)
+
+        lay.addStretch(1)
 
     def _get_selected_voice(self) -> str:
         idx = self._voice_combo.currentIndex()
@@ -8390,10 +9058,10 @@ class MainWindow(QMainWindow):
             self._mute_btn.setAccessibleName("Microphone muted")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {C.RED_BG};
+                    background: {_rgba(C.RED_BG, .6)};
                     color: {C.MUTED_C};
                     border: 1px solid {C.RED};
-                    border-radius: 5px;
+                    border-radius: 10px;
                     padding: 0 12px;
                 }}
                 QPushButton:hover {{
@@ -8406,10 +9074,10 @@ class MainWindow(QMainWindow):
             self._mute_btn.setAccessibleName("Microphone active")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {C.GREEN_BG};
+                    background: {_rgba(C.GREEN_BG, .55)};
                     color: {C.GREEN};
                     border: 1px solid {C.GREEN_D};
-                    border-radius: 5px;
+                    border-radius: 10px;
                     padding: 0 12px;
                 }}
                 QPushButton:hover {{
@@ -8432,14 +9100,14 @@ class MainWindow(QMainWindow):
                 "show the command center", "open command ceneter", "open the command ceneter",
             }:
                 self._set_command_center(True)
-                self._log.append_log("JARVIS: Command Center is open.")
+                self._log.append_log("AID: Command Center is open.")
                 return
             if normalized in {
                 "close command center", "close the command center", "hide command center",
                 "hide the command center", "return to focus view",
             }:
                 self._set_command_center(False)
-                self._log.append_log("JARVIS: Returning to focus view.")
+                self._log.append_log("AID: Returning to focus view.")
                 return
             if self.on_text_command:
                 def _dispatch():
@@ -8454,7 +9122,7 @@ class MainWindow(QMainWindow):
             try:
                 self._log.append_log(f"ERR: Message processing failed: {exc}")
             except Exception:
-                print(f"[JARVIS] Message processing failed: {exc}")
+                print(f"[AID] Message processing failed: {exc}")
 
     def _apply_state(self, state: str):
         self.hud.state    = state
@@ -8504,7 +9172,7 @@ class MainWindow(QMainWindow):
 
         # Show toast for state transitions
         if state == "THINKING":
-            self._show_toast("JARVIS is thinking...", "info")
+            self._show_toast("AID is thinking...", "info")
         elif state == "PROCESSING":
             self._show_toast("Processing request...", "info")
 
@@ -8650,7 +9318,7 @@ class MainWindow(QMainWindow):
         normalized_key = normalize_gemini_api_key(key)
         verified_key = getattr(self._overlay, "_verified_key", "") if self._overlay else ""
         if not normalized_key or normalized_key != verified_key:
-            self._log.append_log("ERR: Setup blocked because the Gemini API key was not verified.")
+            self._log.append_log("ERR: Setup blocked because the WEAID API key was not verified.")
             self._ready = False
             return
         key = normalized_key
@@ -8660,7 +9328,7 @@ class MainWindow(QMainWindow):
             try:
                 store = get_secret_store()
                 store.set("gemini_api_key", key.strip())
-                self._log.append_log("SYS: Gemini API key saved to OS keychain.")
+                self._log.append_log("SYS: WEAID API key saved to OS keychain.")
             except Exception as e:
                 self._log.append_log(f"SYS: Could not save key to keychain: {e}")
 
@@ -8680,7 +9348,7 @@ class MainWindow(QMainWindow):
             # writing it to disk — the user must re-enter it on next start.
             if isinstance(key, str) and key.strip():
                 os.environ["GEMINI_API_KEY"] = key.strip()
-                self._log.append_log("SYS: Gemini API key set for this session (not saved).")
+                self._log.append_log("SYS: WEAID API key set for this session (not saved).")
         except Exception:
             pass
         self._ready = True
@@ -8694,7 +9362,7 @@ class MainWindow(QMainWindow):
         self._log.append_log("SYS: PARALLAX UI COMPLETE   [OK]")
         self._log.append_log("SYS: VOICE SYNTHESIS READY  [OK]")
         self._log.append_log(f"SYS: PLATFORM {os_name.upper()} DETECTED")
-        self._log.append_log("SYS: JARVIS MARK XXXIX - ALL SYSTEMS NOMINAL")
+        self._log.append_log("SYS: AID - WEAID - ALL SYSTEMS NOMINAL")
         # After setup: show voice popup first, then name popup
         self._show_voice_select_then_name()
 
@@ -8811,8 +9479,8 @@ class MainWindow(QMainWindow):
             from memory.memory_manager import update_memory
             update_memory({"identity": {"name": {"value": save_name}}})
             self._log.append_log(f"SYS: Identity set — {save_name}.")
-            self._log.append_log(f"JARVIS: The workshop is now at your disposal, {save_name}.")
-            self._log.append_log("JARVIS: All systems nominal. How may I assist you today?")
+            self._log.append_log(f"AID: The workshop is now at your disposal, {save_name}.")
+            self._log.append_log("AID: All systems nominal. How may I assist you today?")
         except Exception as e:
             self._log.append_log(f"SYS: Could not save name: {e}")
         # Notify JarvisLive so it can update the running session immediately
@@ -9079,6 +9747,14 @@ class JarvisUI:
         self._win.on_text_command = cb
 
     @property
+    def on_wake_requested(self):
+        return self._win.on_wake_requested
+
+    @on_wake_requested.setter
+    def on_wake_requested(self, cb):
+        self._win.on_wake_requested = cb
+
+    @property
     def on_voice_change(self):
         return self._win.on_voice_change
 
@@ -9113,6 +9789,26 @@ class JarvisUI:
         while not self._win._ready:
             time.sleep(0.1)
 
+    def set_last_exchange(self, question: str, answer: str):
+        """Thread-safe: record the latest Q&A pair for the mindmap view."""
+        self._win.set_last_exchange(question, answer)
+
+    def set_mindmap_data(self, data: dict):
+        """Thread-safe: store built insight data (auto-opens viewer if pending)."""
+        self._win.set_mindmap_data(data or {})
+
+    def open_ontology(self):
+        """Thread-safe: open the ontology viewer (graph query support)."""
+        self._win._open_graph_viewer()
+
+    def set_constitution_review(self, review: dict):
+        """Thread-safe: push a constitution review result to the panel."""
+        self._win._constitution_review_sig.emit(review or {})
+
+    def show_mindmap(self):
+        """Thread-safe: open the mindmap / knowledge graph for the last Q&A."""
+        self._win._toggle_mindmap()
+
     def start_speaking(self):
         self.set_state("SPEAKING")
 
@@ -9132,6 +9828,24 @@ class JarvisUI:
             ):
                 return
             self._win._sub_sig.emit(text)
+        except Exception:
+            pass
+
+    def show_hud_spo(self, text: str):
+        """Thread-safe: HUD 중앙에 S-P-O 문자 조립 애니메이션 표시."""
+        try:
+            hud = getattr(self._win, "hud", None)
+            if hud is not None:
+                hud.set_spo_text(text)
+        except Exception:
+            pass
+
+    def show_hud_spo_triples(self, triples: list):
+        """Thread-safe: 인사이트 S-P-O 트리플을 HUD에 구조화 표시."""
+        try:
+            hud = getattr(self._win, "hud", None)
+            if hud is not None:
+                hud.set_spo_triples(triples)
         except Exception:
             pass
 

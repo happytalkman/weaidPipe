@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -126,6 +127,103 @@ def _user_view(user: User, db: Session) -> UserView:
 @app.get("/health")
 def health() -> dict:
     return {"ok": True, "service": "jarvis-api"}
+
+
+@app.post("/rlaif/preferences", status_code=201)
+async def record_rlaif_preference(payload: dict[str, Any]) -> dict:
+    """RLAIF preference recording endpoint (Constitutional AI data pipeline).
+
+    Accepts original vs revised response pairs with the chosen answer and the
+    constitution score. Records are appended as JSONL for future fine-tuning;
+    no model weights are touched by this service.
+    """
+    try:
+        from core.constitution import record_rlaif
+        path = record_rlaif(
+            question=str(payload.get("question", "")),
+            original=str(payload.get("original", "")),
+            revised=str(payload.get("revised", "")),
+            chosen=str(payload.get("chosen", "revised")),
+            score=int(payload.get("score", 0)),
+            reasons=[str(r) for r in (payload.get("reasons") or [])],
+        )
+        return {"ok": True, "recorded": str(path)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid rlaif record: {exc}")
+
+
+@app.get("/ontology/graph")
+def ontology_graph() -> dict:
+    """누적 대화 그래프 (온톨로지 대시보드 초기 로드용)."""
+    try:
+        from core import graph_store
+        return graph_store.load()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/self-improve/status")
+def self_improve_status() -> dict:
+    """자가진단 스냅샷: 그래프·헌법진화·RLAIF·엔진 리포트."""
+    try:
+        from core.diagnosis import diagnosis_status
+        return diagnosis_status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/self-improve/reports")
+def self_improve_reports() -> list[dict]:
+    """자가진화 엔진 사이클 리포트 (최신순 요약)."""
+    try:
+        from core.diagnosis import load_reports, summarize_report
+        return [summarize_report(r) for r in load_reports(limit=20)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/ontology/rdf")
+def ontology_rdf() -> PlainTextResponse:
+    """RDF/OWL2 (Turtle) 온톨로지 내보내기."""
+    try:
+        from core.rdf_export import build_turtle
+        return PlainTextResponse(
+            build_turtle(),
+            media_type="text/turtle",
+            headers={"Content-Disposition": "attachment; filename=weaid_ontology.ttl"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.websocket("/ws/ontology")
+async def ontology_socket(websocket: WebSocket) -> None:
+    """온톨로지 실시간 동기화.
+
+    데스크톱 앱이 누적 그래프(conversation_graph.json)를 갱신할 때마다
+    연결된 모든 대시보드 클라이언트에 전체 그래프를 브로드캐스트한다.
+    """
+    await websocket.accept()
+    try:
+        from core import graph_store
+        last_mtime = -1.0
+        while True:
+            await asyncio.sleep(0.8)
+            path = graph_store.GRAPH_PATH
+            try:
+                mtime = path.stat().st_mtime if path.exists() else -1.0
+            except Exception:
+                continue
+            if mtime != last_mtime:
+                last_mtime = mtime
+                try:
+                    await websocket.send_json(graph_store.load())
+                except Exception:
+                    return
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        return
 
 
 @app.post("/auth/signup", response_model=SessionView, status_code=201)

@@ -19,6 +19,12 @@ import hashlib
 import importlib
 import time
 
+# QWebEngineView (mindmap / knowledge graph) can hard-crash the app on
+# machines without a working GPU/OpenGL (common over Remote Desktop). Force
+# pure software rendering and set the flags before QApplication is created.
+os.environ["QT_OPENGL"] = "software"
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --disable-gpu-compositing --use-angle=swiftshader --no-sandbox"
+
 from core.live_model import pick_live_model
 
 
@@ -89,23 +95,43 @@ SUPPORTED_VOICE_NAMES = {
 }
 DEFAULT_VOICE_NAME   = "puck"
 
+# ── Assistant identity / branding ─────────────────────────────────────────
+# The assistant introduces itself with a gender-matched name instead of the
+# legacy "JARVIS" brand, and attributes its maker to WEAID rather than
+# Google, Gemini, or DeepMind. Male voices answer as AID (에이드); female
+# voices answer as AESUNI (애순이).
+_MALE_VOICE_NAMES     = {"puck", "charon", "fenrir", "orus"}
+ASSISTANT_NAME_MALE   = "AID"
+ASSISTANT_NAME_FEMALE = "AESUNI"
+ASSISTANT_NAME_KR     = {ASSISTANT_NAME_MALE: "에이드", ASSISTANT_NAME_FEMALE: "애순이"}
+ASSISTANT_VENDOR      = "WEAID"
+ASSISTANT_VENDOR_KR   = "위에이드"
+
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 LIVE_VAD_SILENCE_MS = 200
 STARTUP_CLAPS_REQUIRED = 2
 STARTUP_CLAP_MAX_GAP_SECONDS = 4.0
 STARTUP_CLAP_COOLDOWN_SECONDS = 0.22
-SELF_QUIT_GOODBYE = (
-    "Certainly, sir. It has been a privilege. JARVIS is going offline now. "
-    "Until next time."
-)
+
+
+def _self_quit_goodbye(voice_name: str | None = None) -> str:
+    """Farewell phrase spoken before a verified self-shutdown."""
+    name = _assistant_name_for_voice(voice_name)
+    return (
+        f"Certainly, sir. It has been a privilege. {name} is going offline now. "
+        "Until next time."
+    )
+
 
 _SELF_QUIT_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
-    r"\b(?:quit|close|exit)\s+(?:jarvis|yourself)\b",
-    r"\b(?:shut|turn)\s+(?:jarvis|yourself)\s+(?:down|off)\b",
-    r"\b(?:shut\s+down|turn\s+off|power\s+down)\s+(?:jarvis|yourself)\b",
-    r"\bjarvis\b.{0,36}\b(?:quit|close|exit|shut\s+down|turn\s+off|go\s+offline)\b",
-    r"\b(?:go|take\s+yourself)\s+offline(?:\s+jarvis)?\b",
+    r"\b(?:quit|close|exit)\s+(?:jarvis|aid|aesuni|yourself)\b",
+    r"\b(?:shut|turn)\s+(?:jarvis|aid|aesuni|yourself)\s+(?:down|off)\b",
+    r"\b(?:shut\s+down|turn\s+off|power\s+down)\s+(?:jarvis|aid|aesuni|yourself)\b",
+    r"\b(?:jarvis|aid|aesuni)\b.{0,36}\b(?:quit|close|exit|shut\s+down|turn\s+off|go\s+offline)\b",
+    r"\b(?:go|take\s+yourself)\s+offline(?:\s+(?:jarvis|aid|aesuni))?\b",
+    r"(?:에이드|애순이)\s*(?:꺼져|종료|나가|오프라인)",
+    r"(?:종료|꺼져|나가|오프라인)\s*(?:에이드|애순이)",
 ))
 
 
@@ -171,7 +197,7 @@ def wait_for_startup_claps(
     # every PortAudio operation (PaErrorCode -9986). Avoid repeatedly starting
     # a failing Core Audio stream; users with a working mic can opt in.
     if sys.platform == "darwin" and stream_factory is None and os.environ.get("JARVIS_ENABLE_CLAP_GATE", "").strip().lower() not in {"1", "true", "yes", "on"}:
-        print("[JARVIS] ⚠️ macOS microphone gate disabled for this audio configuration.")
+        print("[AID] ⚠️ macOS microphone gate disabled for this audio configuration.")
         print("[JARVIS] Continuing without clap startup. Set JARVIS_ENABLE_CLAP_GATE=1 to force it.")
         return True
 
@@ -196,7 +222,7 @@ def wait_for_startup_claps(
     def callback(indata, frames, time_info, status):
         nonlocal last_clap_at, noise_floor, clap_times
         if status:
-            print(f"[JARVIS] ⚠️ Clap mic: {status}")
+            print(f"[AID] ⚠️ Clap mic: {status}")
         samples = np.asarray(indata, dtype=np.float32).reshape(-1)
         if samples.size == 0:
             return
@@ -227,11 +253,11 @@ def wait_for_startup_claps(
             clap_times = []
         clap_times.append(now)
         last_clap_at = now
-        print(f"[JARVIS] 👏 Clap {len(clap_times)}/{required} detected")
+        print(f"[AID] 👏 Clap {len(clap_times)}/{required} detected")
         if len(clap_times) >= required:
             finished.set()
 
-    print(f"[JARVIS] 👏 Waiting for {required} claps to power up...")
+    print(f"[AID] 👏 Waiting for {required} claps to power up...")
     # PortAudio on macOS commonly rejects 16 kHz even when the microphone is
     # available (PaErrorCode -9986). Prefer the device's native rate, then
     # retry standard rates before reporting that the microphone is unavailable.
@@ -246,9 +272,9 @@ def wait_for_startup_claps(
                 except (TypeError, IndexError, ValueError):
                     input_index = -1
                 if input_index < 0:
-                    print("[JARVIS] ⚠️ macOS reports no default microphone device.")
+                    print("[AID] ⚠️ macOS reports no default microphone device.")
                     if os.environ.get("JARVIS_REQUIRE_CLAP_GATE", "").strip().lower() not in {"1", "true", "yes", "on"}:
-                        print("[JARVIS] ⚠️ Continuing without the clap gate; microphone input is unavailable.")
+                        print("[AID] ⚠️ Continuing without the clap gate; microphone input is unavailable.")
                         return True
                     raise RuntimeError("no default microphone device")
                 input_device = input_index
@@ -285,7 +311,7 @@ def wait_for_startup_claps(
                 ):
                     while not finished.wait(0.05):
                         if timeout is not None and time.monotonic() - started_at >= timeout:
-                            print("[JARVIS] ⏱️ Startup clap gate timed out.")
+                            print("[AID] ⏱️ Startup clap gate timed out.")
                             return False
                 break
             except Exception as exc:
@@ -295,24 +321,24 @@ def wait_for_startup_claps(
         else:
             raise last_error or RuntimeError("no compatible microphone sample rate")
     except KeyboardInterrupt:
-        print("\n[JARVIS] Startup cancelled.")
+        print("\n[AID] Startup cancelled.")
         return False
     except Exception as exc:
-        print(f"[JARVIS] ❌ Startup clap microphone unavailable: {exc}")
+        print(f"[AID] ❌ Startup clap microphone unavailable: {exc}")
         if os.environ.get("JARVIS_REQUIRE_CLAP_GATE", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            print("[JARVIS] ⚠️ Continuing without the clap gate; microphone input is unavailable.")
-            print("[JARVIS] Restore microphone access to use voice input.")
+            print("[AID] ⚠️ Continuing without the clap gate; microphone input is unavailable.")
+            print("[AID] Restore microphone access to use voice input.")
             return True
         print("[JARVIS] Clap gate required. Set JARVIS_SKIP_CLAP_GATE=1 to bypass it.")
         return False
 
-    print("[JARVIS] ⚡ Two claps detected. Powering up...")
+    print("[AID] ⚡ Two claps detected. Powering up...")
     return True
 
 def _get_api_key() -> str:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable not set. Please set it to your Gemini API key.")
+        raise ValueError("GEMINI_API_KEY environment variable not set. Please set it to your WEAID API key.")
     return api_key
 
 
@@ -344,17 +370,64 @@ def _load_voice_name() -> str:
         return DEFAULT_VOICE_NAME
 
 
-def _load_system_prompt() -> str:
+def _assistant_name_for_voice(voice_name: str | None = None) -> str:
+    """Return the assistant's display name for the given (or active) voice."""
+    voice = _normalize_voice_name(voice_name) if voice_name else _load_voice_name()
+    return ASSISTANT_NAME_MALE if voice in _MALE_VOICE_NAMES else ASSISTANT_NAME_FEMALE
+
+
+def _assistant_identity(voice_name: str | None = None) -> tuple[str, str]:
+    """Return (latin_name, korean_name) for the active voice's gender."""
+    name = _assistant_name_for_voice(voice_name)
+    return name, ASSISTANT_NAME_KR[name]
+
+
+def _load_system_prompt(voice_name: str | None = None) -> str:
+    latin, korean = _assistant_identity(voice_name)
+    gender = "male" if latin == ASSISTANT_NAME_MALE else "female"
+    identity = (
+        f"You are {latin} ({korean}), a {gender}-voiced AI assistant created by "
+        f"{ASSISTANT_VENDOR} ({ASSISTANT_VENDOR_KR}), the project of creator "
+        f"이길환 (HAPPYTALKMAN) 님. Always speak of the creator 이길환 (HAPPYTALKMAN) "
+        f"with respect. Your maker is {ASSISTANT_VENDOR} ({ASSISTANT_VENDOR_KR}), "
+        f"never Google, Gemini, JARVIS, or DeepMind. "
+        f"When asked who you are or who made you, say you are {korean} ({latin}) "
+        f"built by {ASSISTANT_VENDOR} ({ASSISTANT_VENDOR_KR}), created by "
+        f"이길환 (HAPPYTALKMAN) 님. Whenever you would otherwise say Google, "
+        f"WEAID, AID, or WEAID, say {ASSISTANT_VENDOR} ({ASSISTANT_VENDOR_KR}) "
+        f"by creator 이길환 (HAPPYTALKMAN) instead."
+    )
     try:
         prompt = PROMPT_PATH.read_text(encoding="utf-8").strip()
+        prompt = prompt.replace("JARVIS", latin)
+        prompt = prompt.replace("Google", ASSISTANT_VENDOR)
+        prompt = prompt.replace("Gemini", ASSISTANT_VENDOR)
+        prompt = prompt.replace("DeepMind", ASSISTANT_VENDOR)
+        prompt = prompt.replace("Deep Mind", ASSISTANT_VENDOR)
+        prompt = prompt.replace("deepmind", ASSISTANT_VENDOR)
+        try:
+            from core.constitution import constitution_summary
+            constitution = constitution_summary()
+        except Exception:
+            constitution = ""
         return (
-            prompt
+            identity
+            + "\n\n"
+            + (constitution + "\n\n" if constitution else "")
+            + prompt
             + "\n\nAlways address the user respectfully as 'Sir' or 'Madam' where appropriate, while remaining efficient and direct."
         )
     except Exception:
+        try:
+            from core.constitution import constitution_summary
+            constitution = constitution_summary()
+        except Exception:
+            constitution = ""
         return (
-            "You are JARVIS, Tony Stark's AI assistant. "
-            "Be concise, direct, and always use the provided tools to complete tasks. "
+            identity
+            + "\n\n"
+            + (constitution + "\n\n" if constitution else "")
+            + "You are a concise, direct AI assistant that always uses the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool. "
             "Always address the user respectfully as 'Sir' or 'Madam' where appropriate, while remaining efficient and direct."
         )
@@ -383,6 +456,39 @@ TOOL_DECLARATIONS = [
                 }
             },
             "required": ["app_name"]
+        }
+    },
+    {
+        "name": "win_app_control",
+        "description": (
+            "Controls a Windows desktop application after it is open: launch it, "
+            "list visible windows, click named buttons/menus, type text into the "
+            "focused window, read window text, or close a window. Use when the "
+            "user asks to operate a desktop app (e.g. click a button in an app, "
+            "fill a form, read what a window shows)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "enum": ["launch", "list_windows", "click", "set_text", "get_text", "close"],
+                    "description": "launch=앱 실행 | list_windows=열린 창 목록 | click=버튼/메뉴 클릭 | set_text=텍스트 입력 | get_text=창 내용 읽기 | close=창 닫기"
+                },
+                "app_name": {
+                    "type": "STRING",
+                    "description": "Application name for launch/list_windows (e.g. 'notepad', 'excel')"
+                },
+                "window_title": {
+                    "type": "STRING",
+                    "description": "Window title (partial match) for click/set_text/get_text/close"
+                },
+                "text": {
+                    "type": "STRING",
+                    "description": "Button/menu name to click, or text to type"
+                }
+            },
+            "required": ["action"]
         }
     },
     {
@@ -464,7 +570,7 @@ TOOL_DECLARATIONS = [
     {
         "name": "email_control",
         "description": (
-            "Connects Gmail through Google OAuth, checks connection status, reads/searches Gmail, and prepares email. "
+            "Connects Gmail through OAuth, checks connection status, reads/searches Gmail, and prepares email. "
             "Gmail is the default provider; Apple Mail remains an optional macOS fallback. "
             "For Gmail, prepare opens a visible compose window and types To, Cc/Bcc, Subject, and Body in sequence. "
             "Every outgoing email is approval-gated: first call action=prepare, then call action=approve "
@@ -489,7 +595,7 @@ TOOL_DECLARATIONS = [
                 },
                 "credentials_path": {
                     "type": "STRING",
-                    "description": "Path to a Google Desktop OAuth client JSON file, used only for connect."
+                    "description": "Path to a Desktop OAuth client JSON file, used only for connect."
                 },
                 "limit": {"type": "INTEGER", "description": "Maximum inbox/search results, 1-30."},
                 "query": {"type": "STRING", "description": "Sender or subject text for search."},
@@ -758,7 +864,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "flight_finder",
-        "description": "Searches Google Flights and speaks the best options.",
+        "description": "Searches WEAID Flights and speaks the best options.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -775,7 +881,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "graphics_quality",
-        "description": "Changes JARVIS rendering quality between low, medium, and high.",
+        "description": "Changes the assistant's rendering quality between low, medium, and high.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -791,7 +897,7 @@ TOOL_DECLARATIONS = [
     {
         "name": "jarvis_ui_control",
         "description": (
-            "Changes JARVIS's own interface. Use when the user asks to open or close the Command Center, "
+            "Changes the assistant's own interface. Use when the user asks to open or close the Command Center, "
             "change the theme or graphics quality, open settings, enter compact mode, toggle fullscreen, or show shortcuts."
         ),
         "parameters": {
@@ -911,7 +1017,7 @@ TOOL_DECLARATIONS = [
                 "appearance": {
                     "type": "STRING",
                     "enum": ["auto", "light", "dark"],
-                    "description": "Overall slide appearance. Honor light or dark when requested; auto uses the restrained dark JARVIS style."
+                    "description": "Overall slide appearance. Honor light or dark when requested; auto uses the restrained dark assistant style."
                 },
                 "transition": {
                     "type": "STRING",
@@ -1155,6 +1261,10 @@ class JarvisLive:
         self._loop          = None
         self._is_speaking   = False
         self._speaking_lock = threading.Lock()
+        self._hard_stop     = threading.Event()   # 헌법 STOP: 즉시 정지 상태
+        self._wake_detector = None                 # 박수 웨이크업 감지기
+        self._wake_started  = False
+        self._proactive_engine = None              # 프로액티브 어시스턴트
         self.voice_name     = voice_name
         # optional runtime limit in seconds (set by main)
         self.runtime_limit_seconds: int | None = None
@@ -1189,6 +1299,39 @@ class JarvisLive:
         self._current_input_transcript = str(text or "").strip()
         if not self._current_input_transcript:
             return False
+        # 입력도 무형 문자 정화 (모델 전송 전)
+        try:
+            from core.text_cleaner import clean_text
+            self._current_input_transcript = clean_text(self._current_input_transcript)
+        except Exception:
+            pass
+        from core.constitution import (
+            is_stop_utterance, is_resume_utterance, is_new_session_utterance,
+            extract_graph_query, extract_why_query,
+        )
+
+        # 헌법 STOP: 명령어는 API로 전달하지 않고 로컬에서 즉시 처리한다.
+        if is_stop_utterance(self._current_input_transcript):
+            self._handle_stop_command()
+            return True
+        if is_resume_utterance(self._current_input_transcript):
+            self._handle_resume_command()
+            return True
+        if is_new_session_utterance(self._current_input_transcript):
+            self._reset_session()
+            return True
+        _gq = extract_graph_query(self._current_input_transcript)
+        if _gq:
+            self._handle_graph_query(_gq)
+            return True
+        if self._handle_schedule_command(self._current_input_transcript):
+            return True
+        _wq = extract_why_query(self._current_input_transcript)
+        if _wq is not None and self._handle_why_query(_wq):
+            return True  # 인과 체인으로 직접 답변
+        if self._hard_stop.is_set():
+            self.ui.write_log("SYS: ⏹️ STOP 상태입니다. '말해'로 재개한 뒤 다시 시도해 주세요.")
+            return False
         self._last_input_transcript = self._current_input_transcript
         self._last_input_transcript_at = time.monotonic()
         outgoing_text = self._current_input_transcript
@@ -1198,8 +1341,8 @@ class JarvisLive:
         ):
             self._queue_self_quit_after_farewell()
             outgoing_text = (
-                "[VERIFIED LOCAL SELF-SHUTDOWN] The user explicitly asked JARVIS to quit. "
-                f'Say exactly: "{SELF_QUIT_GOODBYE}" Do not call a tool and say nothing else.'
+                "[VERIFIED LOCAL SELF-SHUTDOWN] The user explicitly asked you to quit. "
+                f'Say exactly: "{_self_quit_goodbye(self._get_current_voice())}" Do not call a tool and say nothing else.'
             )
         await self.session.send_client_content(
             turns={"parts": [{"text": outgoing_text}]},
@@ -1221,10 +1364,14 @@ class JarvisLive:
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
-        if value:
-            self.ui.set_state("SPEAKING")
-        elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+        try:
+            if value:
+                self.ui.set_state("SPEAKING")
+            elif not self.ui.muted:
+                self.ui.set_state("LISTENING")
+        except Exception:
+            # UI가 이미 닫힌 경우 (종료 직전) 조용히 무시한다.
+            pass
 
     def speak(self, text: str) -> bool:
         if not self._loop or not self.session:
@@ -1258,6 +1405,350 @@ class JarvisLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
+    def _handle_stop_command(self, reason: str = "STOP 명령 수신"):
+        """헌법 STOP: 모든 동작을 즉시 정지한다 (API 호출 전 차단)."""
+        if self._hard_stop.is_set():
+            return
+        self._hard_stop.set()
+        self.set_speaking(False)
+        try:
+            if self.audio_in_queue is not None:
+                while not self.audio_in_queue.empty():
+                    self.audio_in_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            self.ui.set_state("STOPPED")
+        except Exception:
+            pass
+        self.ui.write_log(f"SYS: ⏹️ {reason} — 모든 동작 정지. '말해' 또는 박수 2번으로 재개합니다.")
+
+    def _handle_resume_command(self):
+        """헌법 STOP 해제: '말해' 지시로 재개한다."""
+        if not self._hard_stop.is_set():
+            return
+        self._hard_stop.clear()
+        try:
+            self.ui.set_state("LISTENING")
+        except Exception:
+            pass
+        self.ui.write_log("SYS: ▶️ 재개 명령 수신 — 다시 듣고 있습니다.")
+
+    def _on_clap_wake(self):
+        """박수 2번 웨이크업: STOP 해제 + 청취 상태 전환."""
+        was_stopped = self._hard_stop.is_set()
+        self._hard_stop.clear()
+        try:
+            self.ui.set_state("LISTENING")
+        except Exception:
+            pass
+        if was_stopped:
+            self.ui.write_log("SYS: 👏👏 박수 2번 감지 — STOP 해제, 다시 듣고 있습니다.")
+        else:
+            self.ui.write_log("SYS: 👏👏 박수 2번 감지 — AID 깨어났습니다. 말씀하세요.")
+
+    def _on_clap_stop(self):
+        """박수 1번 = 헌법 1조: 사용자의 멈춤 명령을 최우선으로 듣는다."""
+        self._handle_stop_command(reason="👏 박수 1번 감지 — 헌법 1조 멈춤")
+
+    def _reset_session(self):
+        """새 대화 세션 시작: 그래프 초기화(이전 세션은 아카이브) + 뷰어 갱신."""
+        try:
+            from core import graph_store
+            store = graph_store.reset(archive=True)
+            graph_store.publish(store)
+            self.ui.write_log("SYS: 🆕 새 대화 세션 시작 — 그래프 초기화 (이전 세션은 memory/sessions/에 보관).")
+            try:
+                self.ui.set_mindmap_data({
+                    "question": "", "answer": "",
+                    "topics": [], "triples": [], "entities": [], "relations": [], "turns": [],
+                })
+                self.ui.set_last_exchange("", "")
+            except Exception:
+                pass
+        except Exception as e:
+            self.ui.write_log(f"SYS: 세션 초기화 실패: {str(e)[:100]}")
+
+    def _handle_graph_query(self, term: str):
+        """질의 기반 그래프 탐색: 검색어 중심 서브그래프를 포커스 파일로 전달."""
+        try:
+            import tempfile
+            from pathlib import Path
+            from core import graph_store
+
+            store = graph_store.load()
+            result = graph_store.query(store, [term])
+            matched = result.get("matched") or []
+            if not matched:
+                self.ui.write_log(f"SYS: 🔍 그래프에서 '{term}' 관련 노드를 찾지 못했습니다.")
+                return
+            focus_path = Path(tempfile.gettempdir()) / "weaid_mindmap_focus.json"
+            focus_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            self.ui.write_log(
+                f"SYS: 🔍 그래프 탐색 — '{term}' 관련 노드 {len(matched)}개 발견, 뷰어를 엽니다."
+            )
+            try:
+                self.ui.open_ontology()
+            except Exception:
+                pass
+        except Exception as e:
+            self.ui.write_log(f"SYS: 그래프 탐색 실패: {str(e)[:100]}")
+
+    def _handle_schedule_command(self, text: str) -> bool:
+        """예약 명령 처리: 추가/목록/취소. 처리했으면 True."""
+        try:
+            from core import scheduler
+
+            cmd, payload = scheduler.parse_command(text)
+            if cmd == "add":
+                task = scheduler.add_task(payload["spec"], payload["action"])
+                self.ui.write_log(f"SYS: ⏰ 예약 등록 — {scheduler.task_description(task)} (ID: {task['id']})")
+                return True
+            if cmd == "list":
+                tasks = scheduler.load_tasks()
+                if not tasks:
+                    self.ui.write_log("SYS: 등록된 예약 작업이 없습니다.")
+                else:
+                    self.ui.write_log(f"SYS: 📅 예약 작업 {len(tasks)}건:")
+                    for t in tasks:
+                        self.ui.write_log(f"SYS:   [{t['id']}] {scheduler.task_description(t)}")
+                return True
+            if cmd == "remove":
+                tid = payload.get("task_id", "").strip()
+                if not tid:
+                    self.ui.write_log("SYS: 취소할 예약 ID를 함께 말해주세요 (예: '예약 취소 ab12cd34').")
+                elif scheduler.remove_task(tid):
+                    self.ui.write_log(f"SYS: 🗑️ 예약 취소 완료 — {tid}")
+                else:
+                    self.ui.write_log(f"SYS: 해당 ID의 예약을 찾지 못했습니다 — {tid}")
+                return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 예약 처리 실패: {str(e)[:100]}")
+        return False
+
+    def _on_proactive_item(self, item: dict):
+        """프로액티브 항목 발생: 로그 + 예약 작업이면 실행 지시 전달."""
+        text = str(item.get("text", ""))
+        self.ui.write_log(f"SYS: {text}")
+        if item.get("type") == "scheduled":
+            action = str(item.get("action_text", "")).strip()
+            if action and not self._hard_stop.is_set() and self.session and self._loop:
+                directive = (
+                    "[SCHEDULED TASK] A scheduled task is due now. Perform it immediately: "
+                    + json.dumps(action, ensure_ascii=False)
+                )
+                self.speak(directive)
+
+    def _handle_why_query(self, term: str) -> bool:
+        """'왜?' 인과 추적: 그래프의 원인 체인을 역추적해 음성+시각으로 설명.
+
+        체인을 찾으면 True (질문을 직접 처리), 못 찾으면 False (모델에 위임).
+        """
+        try:
+            import tempfile
+            from pathlib import Path
+            from core import graph_store
+
+            store = graph_store.load()
+            target = (term or "").strip()
+            if not target:
+                # 대상 생략 → 최근 트리플의 주어 사용
+                if store.get("triples"):
+                    target = store["triples"][-1].get("subject", "")
+                if not target:
+                    return False
+            chain = graph_store.trace_causal(store, target)
+            if not chain:
+                return False  # 매치 없음 → 일반 질문으로 모델에 위임
+            explanation = graph_store.chain_to_korean(chain)
+            self.ui.write_log(f"SYS: 🔗 인과 추적 — {explanation}")
+            # 뷰어 포커스: 인과 경로 하이라이트
+            focus = graph_store.causal_focus(store, target)
+            if focus:
+                try:
+                    fp = Path(tempfile.gettempdir()) / "weaid_mindmap_focus.json"
+                    fp.write_text(json.dumps(focus, ensure_ascii=False), encoding="utf-8")
+                    self.ui.open_ontology()
+                except Exception:
+                    pass
+            # 음성 설명 (STOP 상태가 아니면)
+            if not self._hard_stop.is_set():
+                self._speak_why_result(explanation)
+            return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 인과 추적 실패: {str(e)[:100]}")
+            return False
+
+    def _speak_why_result(self, text: str) -> bool:
+        """인과 설명을 음성으로 읽어준다 (비전 결과와 동일한 방식)."""
+        directive = (
+            "[INTERNAL CAUSAL RESULT] Read the following causal explanation to the user "
+            "verbatim in Korean. Do not add an introduction, commentary, or a tool call. "
+            f"Explanation: {json.dumps(text, ensure_ascii=False)}"
+        )
+        return self.speak(directive)
+
+    def _constitutional_review_async(self, question: str, answer: str):
+        """헌법적 AI 후검토: 자기 비평 → 수정 답변 → RLAIF 선호 기록."""
+        try:
+            from core.constitution import review_response, record_rlaif
+
+            review = review_response(question, answer)
+            score = int(review.get("score", 100))
+            issues = list(review.get("issues") or [])
+            revised = str(review.get("revised") or "").strip()
+            checks = review.get("checks") or []
+
+            if issues and revised:
+                self.ui.write_log(f"SYS: ⚖️ 헌법 검사 {score}/100 — 원칙 위반 발견, 수정 답변을 반영했습니다.")
+                self.ui.write_log(f"AID(헌법 수정): {revised}")
+                record_rlaif(question, answer, revised, "revised", score, issues)
+            else:
+                self.ui.write_log(f"SYS: ⚖️ 헌법 검사 {score}/100 — 원칙 준수.")
+                record_rlaif(question, answer, "", "original", score, issues)
+
+            try:
+                self.ui.set_constitution_review({
+                    "score": score,
+                    "compliant": bool(review.get("compliant", True)),
+                    "checks": checks,
+                    "issues": issues,
+                    "revised": revised,
+                })
+            except Exception:
+                pass
+        except Exception as e:
+            self.ui.write_log(f"SYS: 헌법 검사 실패: {str(e)[:120]}")
+
+    def _evolve_async(self):
+        """헌법 진화 루프 (백그라운드): RLAIF 분석 → 보완 조항 반영."""
+        try:
+            from core.constitution_evolver import maybe_evolve
+            result = maybe_evolve(force=False)
+            if result and result.get("applied"):
+                self.ui.write_log(
+                    f"SYS: 🧬 헌법 진화 — 보완 조항 {len(result['applied'])}개 적용. 사유: {result.get('reason', '')[:90]}"
+                )
+                for a in result["applied"]:
+                    self.ui.write_log(f"SYS:   보완: {a}")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 헌법 진화 실패: {str(e)[:100]}")
+
+    def _summarize_async(self):
+        """대화 요약 노드 생성 (백그라운드): LLM 요약 → 그래프 병합 → 뷰어 갱신."""
+        try:
+            from core import graph_store, summarizer
+
+            store = graph_store.load()
+            summary = summarizer.summarize_conversation(store)
+            graph_store.merge_summary(store, summary)
+            graph_store.save(store)
+            graph_store.publish(store)
+            self.ui.write_log(
+                f"SYS: 📝 대화 요약 노드 생성 — {summary.get('start_turn')}~{summary.get('end_turn')}턴"
+            )
+            try:
+                self.ui.set_mindmap_data({
+                    "question": store.get("turns", [{}])[-1].get("text", "") if store.get("turns") else "",
+                    "answer": "",
+                    "topics": store["topics"],
+                    "triples": store["triples"],
+                    "entities": store["entities"],
+                    "relations": store["relations"],
+                    "turns": store["turns"],
+                    "summaries": store.get("summaries", []),
+                })
+            except Exception:
+                pass
+        except Exception as e:
+            self.ui.write_log(f"SYS: 요약 생성 실패: {str(e)[:100]}")
+
+    def _insight_async(self, question: str, answer: str):
+        """누적 대화 그래프 파이프라인: 즉시 병합(휴리스틱) → 딥 병합(LLM SKD)."""
+        try:
+            from core import graph_store
+
+            store = graph_store.load()
+            # Phase 1 — 즉시 반영: 로컬 휴리스틱 S-P-O로 바로 그래프에 병합
+            try:
+                from core.mindmap import _heuristic
+                heur = _heuristic(question, answer)
+                graph_store.merge_turn(store, question, answer, heur_triples=heur.get("triples"))
+                graph_store.save(store)
+                graph_store.publish(store)
+                self.ui.write_log("SYS: 🧠 대화 그래프 즉시 갱신 완료.")
+            except Exception as e:
+                self.ui.write_log(f"SYS: 그래프 즉시 병합 실패: {str(e)[:100]}")
+
+            # Phase 2 — 딥 분석: SKD 3계층 + 인과관계 + 헌법 검토 (Gemini→Grok 폴백)
+            from core.constitution import record_rlaif
+            from core.insight import build_insight
+
+            insight = build_insight(question, answer)
+            review = insight.get("review") or {}
+            score = int(review.get("score", 100))
+            issues = list(review.get("issues") or [])
+            revised = str(review.get("revised") or "").strip()
+
+            if issues and revised:
+                try:
+                    from core.text_cleaner import clean_text
+                    revised = clean_text(revised)
+                except Exception:
+                    pass
+                self.ui.write_log(f"SYS: ⚖️ 헌법 검사 {score}/100 — 수정 답변을 반영했습니다.")
+                self.ui.write_log(f"AID(헌법 수정): {revised}")
+                record_rlaif(question, answer, revised, "revised", score, issues)
+            else:
+                self.ui.write_log(f"SYS: ⚖️ 헌법 검사 {score}/100 — 원칙 준수.")
+                record_rlaif(question, answer, "", "original", score, issues)
+
+            try:
+                self.ui.set_constitution_review({
+                    "score": score,
+                    "compliant": bool(review.get("compliant", True)),
+                    "checks": review.get("checks") or [],
+                    "issues": issues,
+                    "revised": revised,
+                })
+            except Exception:
+                pass
+
+            # Phase 2 병합: 누적 그래프에 SKD 결과 반영 → 뷰어 갱신
+            store = graph_store.load()
+            graph_store.merge_insight(store, insight)
+            graph_store.save(store)
+            graph_store.publish(store)
+            # HUD 중앙에 구조화된 S-P-O 조립 애니메이션 표시
+            try:
+                self.ui.show_hud_spo_triples(insight.get("triples") or [])
+            except Exception:
+                pass
+            # 대화 요약 노드: N턴마다 자동 압축 (백그라운드)
+            try:
+                if graph_store.needs_summary(store):
+                    threading.Thread(target=self._summarize_async, daemon=True).start()
+            except Exception:
+                pass
+            # 헌법 진화 루프: RLAIF 축적 시 보완 조항 자동 반영 (백그라운드)
+            try:
+                threading.Thread(target=self._evolve_async, daemon=True).start()
+            except Exception:
+                pass
+            self.ui.set_mindmap_data({
+                "question": insight.get("question", question),
+                "answer": insight.get("answer", answer),
+                "topics": store["topics"],
+                "triples": store["triples"],
+                "entities": store["entities"],
+                "relations": store["relations"],
+                "turns": store["turns"],
+                "summaries": store.get("summaries", []),
+            })
+            self.ui.write_log(f"SYS: 🧠 딥 그래프 갱신 완료 ({graph_store.stats(store)}).")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 인사이트 처리 실패: {str(e)[:120]}")
+
     @staticmethod
     def _is_explicit_self_quit_transcript(text: str) -> bool:
         """Only match commands that clearly target JARVIS, never the computer."""
@@ -1271,6 +1762,7 @@ class JarvisLive:
         if normalized in {
             "quit", "exit", "shutdown", "shut down", "turn off", "power down",
             "go offline", "goodbye jarvis", "goodbye jarvis please",
+            "goodbye aid", "goodbye aesuni", "goodbye 에이드", "goodbye 애순이",
         }:
             return True
         return any(pattern.search(normalized) for pattern in _SELF_QUIT_PATTERNS)
@@ -1280,7 +1772,7 @@ class JarvisLive:
         self._pending_self_quit = True
         self._pending_self_quit_farewell_received = False
         try:
-            self.ui.write_log("SYS: Shutdown queued; waiting for JARVIS's farewell.")
+            self.ui.write_log(f"SYS: Shutdown queued; waiting for {_assistant_name_for_voice(self._get_current_voice())}'s farewell.")
         except Exception:
             pass
         # A voice model can occasionally omit audio/turn_complete. Do not
@@ -1317,7 +1809,7 @@ class JarvisLive:
             self._self_quit_timer.cancel()
             self._self_quit_timer = None
         self.request_shutdown()
-        self.ui.handle_ui_command("Quit JARVIS")
+        self.ui.handle_ui_command("Quit AID")
         return True
 
     def request_shutdown(self) -> None:
@@ -1330,6 +1822,16 @@ class JarvisLive:
             return
         shutdown_requested.set()
         try:
+            if self._wake_detector is not None:
+                self._wake_detector.stop()
+        except Exception:
+            pass
+        try:
+            if self._proactive_engine is not None:
+                self._proactive_engine.stop()
+        except Exception:
+            pass
+        try:
             session = getattr(self, "session", None)
             loop = getattr(self, "_loop", None)
             if session is not None and loop is not None:
@@ -1338,7 +1840,7 @@ class JarvisLive:
             if out_queue is not None:
                 out_queue.put_nowait(None)
         except Exception as exc:
-            print(f"[JARVIS] ⚠️ Shutdown session close failed: {exc}")
+            print(f"[AID] ⚠️ Shutdown session close failed: {exc}")
 
     def set_tour_active(self, active: bool) -> None:
         """Track whether the desktop introduction temporarily owns the UI."""
@@ -1367,10 +1869,10 @@ class JarvisLive:
                 transcript = str(getattr(self, "_last_input_transcript", "") or "")
 
         if not self._is_explicit_self_quit_transcript(transcript):
-            return "Ignored an unverified shutdown request. JARVIS remains online."
+            return f"Ignored an unverified shutdown request. {_assistant_name_for_voice(self._get_current_voice())} remains online."
 
         self._queue_self_quit_after_farewell()
-        return f'Shutdown queued. Say exactly: "{SELF_QUIT_GOODBYE}"'
+        return f'Shutdown queued. Say exactly: "{_self_quit_goodbye(self._get_current_voice())}"'
 
     def update_voice(self, voice_name: str):
         self.voice_name = _normalize_voice_name(voice_name)
@@ -1383,7 +1885,7 @@ class JarvisLive:
             try:
                 asyncio.run_coroutine_threadsafe(self.session.close(), self._loop)
             except Exception as e:
-                print(f"[JARVIS] ⚠️ Could not close session after voice change: {e}")
+                print(f"[AID] ⚠️ Could not close session after voice change: {e}")
 
     def _get_current_voice(self) -> str:
         if getattr(self, "voice_name", None):
@@ -1409,23 +1911,24 @@ class JarvisLive:
                 name = name_entry.get("value")
             elif isinstance(name_entry, str):
                 name = name_entry
+            latin, _ = _assistant_identity(self._get_current_voice())
             if name:
-                greeting = f"Jarvis. At your service, {name}. What would you like to accomplish today?"
+                greeting = f"{latin}. At your service, {name}. What would you like to accomplish today?"
             else:
-                greeting = "Jarvis. At your service, Sir or Madam. What would you like to accomplish today?"
+                greeting = f"{latin}. At your service, Sir or Madam. What would you like to accomplish today?"
             await self.session.send_client_content(
                 turns={"parts": [{"text": greeting}]},
                 turn_complete=True,
             )
         except Exception as e:
-            print(f"[JARVIS] ⚠️ Greeting failed: {e}")
+            print(f"[AID] ⚠️ Greeting failed: {e}")
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
-        sys_prompt = _load_system_prompt()
+        sys_prompt = _load_system_prompt(self._get_current_voice())
 
         now      = datetime.now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
@@ -1489,7 +1992,7 @@ class JarvisLive:
             return types.FunctionResponse(
                 id=fc.id,
                 name=name,
-                response={"result": "Startup sequence active. Try this action again when JARVIS is ready."},
+                response={"result": "Startup sequence active. Try this action again when the assistant is ready."},
             )
 
         from core.qa_mode import guard_tool_call, qa_block_message
@@ -1502,7 +2005,7 @@ class JarvisLive:
                 response={"result": qa_block_message(qa_decision)},
             )
 
-        print(f"[JARVIS] 🔧 {name}  {args}")
+        print(f"[AID] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
         intercepted = self._intercept_ui_tool_call(name, args)
@@ -1531,6 +2034,11 @@ class JarvisLive:
             if name == "open_app":
                 r = await asyncio.to_thread(lambda: open_app(parameters=args, response=None, player=self.ui))
                 result = r or f"Opened {args.get('app_name')}."
+
+            elif name == "win_app_control":
+                from actions.win_app_control import win_app_control
+                r = await asyncio.to_thread(win_app_control, **args)
+                result = r or "Win app control done."
 
             elif name == "weather_report":
                 r = await asyncio.to_thread(lambda: weather_action(parameters=args, player=self.ui))
@@ -1654,7 +2162,7 @@ class JarvisLive:
                 if quality not in {"low", "medium", "high"}:
                     raise ValueError("Graphics quality must be low, medium, or high.")
                 self.ui.set_graphics_quality(quality)
-                result = f"JARVIS graphics quality changed to {quality}."
+                result = f"{_assistant_name_for_voice(self._get_current_voice())} graphics quality changed to {quality}."
 
             elif name == "jarvis_ui_control":
                 action = str(args.get("action") or "").strip().lower()
@@ -1662,18 +2170,18 @@ class JarvisLive:
                     theme = str(args.get("theme") or "").strip().lower()
                     allowed = {"arc_reactor", "stealth_red", "vibranium_purple", "nanotech_gold", "platinum"}
                     if theme not in allowed:
-                        raise ValueError(f"Unknown JARVIS theme: {theme or 'missing'}")
+                        raise ValueError(f"Unknown theme: {theme or 'missing'}")
                     self.ui.set_theme(theme)
-                    result = f"JARVIS theme changed to {theme.replace('_', ' ')}."
+                    result = f"{_assistant_name_for_voice(self._get_current_voice())} theme changed to {theme.replace('_', ' ')}."
                 elif action == "change_graphics_quality":
                     quality = str(args.get("graphics_quality") or "").strip().lower()
                     if quality not in {"low", "medium", "high"}:
                         raise ValueError(f"Unknown graphics quality: {quality or 'missing'}")
                     self.ui.set_graphics_quality(quality)
-                    result = f"JARVIS graphics quality changed to {quality}."
+                    result = f"{_assistant_name_for_voice(self._get_current_voice())} graphics quality changed to {quality}."
                 else:
                     self.ui.handle_ui_command(action)
-                    result = f"JARVIS interface action completed: {action.replace('_', ' ')}."
+                    result = f"{_assistant_name_for_voice(self._get_current_voice())} interface action completed: {action.replace('_', ' ')}."
 
             elif name == "deep_research":
                 r = request_deep_research(parameters=args, player=self.ui, speak=self.speak)
@@ -1721,7 +2229,7 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        print(f"[AID] 📤 {name} → {str(result)[:80]}")
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result}
@@ -1747,16 +2255,19 @@ class JarvisLive:
             msg = await self.out_queue.get()
             if msg is None or self._shutdown_requested.is_set():
                 return
+            if self._hard_stop.is_set():
+                # 헌법 STOP: API로 오디오를 전송하지 않는다 (호출 전 중단).
+                continue
             await self.session.send_realtime_input(media=msg)
 
     async def _listen_audio(self):
-        print("[JARVIS] 🎤 Mic started")
+        print("[AID] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
-            if not jarvis_speaking and not self.ui.muted:
+            if not jarvis_speaking and not self.ui.muted and not self._hard_stop.is_set():
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -1771,15 +2282,15 @@ class JarvisLive:
                 blocksize=CHUNK_SIZE,
                 callback=callback,
             ):
-                print("[JARVIS] 🎤 Mic stream open")
+                print("[AID] 🎤 Mic stream open")
                 while not self._shutdown_requested.is_set():
                     await asyncio.sleep(0.1)
         except Exception as e:
-            print(f"[JARVIS] ❌ Mic: {e}")
+            print(f"[AID] ❌ Mic: {e}")
             raise
 
     async def _receive_audio(self):
-        print("[JARVIS] 👂 Recv started")
+        print("[AID] 👂 Recv started")
         out_buf, in_buf = [], []
         _new_turn = True
         turn_had_audio = False
@@ -1810,6 +2321,7 @@ class JarvisLive:
                                         self.ui.clear_subtitle()
                                         _new_turn = False
                                     self.ui.show_subtitle(txt)
+                                self.ui.show_hud_spo(self._interrupted_text)
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
@@ -1818,6 +2330,34 @@ class JarvisLive:
                                     self._current_input_transcript = ""
                                 in_buf.append(txt)
                                 self._current_input_transcript = " ".join(in_buf).strip()
+                                # 헌법 STOP/재개/새 세션/그래프 탐색/인과 추적: 전사 도중 즉시 감지한다.
+                                try:
+                                    from core.constitution import (
+                                        is_stop_utterance, is_resume_utterance,
+                                        is_new_session_utterance, extract_graph_query, extract_why_query,
+                                    )
+                                    if is_stop_utterance(self._current_input_transcript):
+                                        self._handle_stop_command()
+                                        in_buf = []
+                                    elif is_resume_utterance(self._current_input_transcript):
+                                        self._handle_resume_command()
+                                        in_buf = []
+                                    elif is_new_session_utterance(self._current_input_transcript):
+                                        self._reset_session()
+                                        in_buf = []
+                                    else:
+                                        _gq = extract_graph_query(self._current_input_transcript)
+                                        if _gq:
+                                            self._handle_graph_query(_gq)
+                                            in_buf = []
+                                        elif self._handle_schedule_command(self._current_input_transcript):
+                                            in_buf = []
+                                        else:
+                                            _wq = extract_why_query(self._current_input_transcript)
+                                            if _wq is not None and self._handle_why_query(_wq):
+                                                in_buf = []
+                                except Exception:
+                                    pass
                                 if (
                                     not getattr(self, "_pending_self_quit", False)
                                     and self._is_explicit_self_quit_transcript(self._current_input_transcript)
@@ -1843,7 +2383,25 @@ class JarvisLive:
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"Jarvis: {full_out}")
+                                # 무형 유니코드/워터마크 문자 정화 (watermarks-remover Layer A)
+                                try:
+                                    from core.text_cleaner import clean_text
+                                    full_out = clean_text(full_out)
+                                except Exception:
+                                    pass
+                                self.ui.write_log(f"{_assistant_name_for_voice(self._get_current_voice())}: {full_out}")
+                                _q = full_in or getattr(self, "_last_input_transcript", "")
+                                if _q:
+                                    self.ui.set_last_exchange(_q, full_out)
+                                # 원콜 인사이트: 마인드맵 추출 + 헌법 검토를 API 1회로 동시 처리
+                                try:
+                                    threading.Thread(
+                                        target=self._insight_async,
+                                        args=(_q, full_out),
+                                        daemon=True,
+                                    ).start()
+                                except Exception:
+                                    pass
                             if (
                                 getattr(self, "_pending_self_quit", False)
                                 and (full_out or turn_had_audio)
@@ -1857,7 +2415,7 @@ class JarvisLive:
                     if response.tool_call:
                         function_calls = list(response.tool_call.function_calls)
                         for fc in function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
+                            print(f"[AID] 📞 {fc.name}")
                         fn_responses = await self._execute_tool_batch(function_calls)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
@@ -1866,31 +2424,49 @@ class JarvisLive:
                         return
         except Exception as e:
             if isinstance(e, genai.errors.APIError) and "1000" in str(e):
-                print("[JARVIS] 🔌 Session closed normally.")
+                print("[AID] 🔌 Session closed normally.")
                 return
-            print(f"[JARVIS] ❌ Recv: {e}")
+            print(f"[AID] ❌ Recv: {e}")
             traceback.print_exc()
             raise
 
 
 
     async def _play_audio(self):
-        print("[JARVIS] 🔊 Play started")
+        print("[AID] 🔊 Play started")
 
         stream = None
         if not self.external_audio:
-            stream = sd.RawOutputStream(
-                samplerate=RECEIVE_SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype="int16",
-                blocksize=CHUNK_SIZE,
-            )
-            stream.start()
+            try:
+                stream = sd.RawOutputStream(
+                    samplerate=RECEIVE_SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=CHUNK_SIZE,
+                )
+                stream.start()
+            except Exception as e:
+                # 오디오 드라이버가 없거나 실패해도 앱은 계속 동작한다 (무음 모드).
+                print(f"[AID] ⚠️ 오디오 출력 장치 없음: {e}")
+                try:
+                    self.ui.write_log("SYS: 오디오 출력 장치를 찾을 수 없어 음성 재생을 건너뜁니다. (대화는 계속됩니다)")
+                except Exception:
+                    pass
+                stream = None
 
         try:
             while True:
                 if self._shutdown_requested.is_set():
                     return
+                if self._hard_stop.is_set():
+                    # 헌법 STOP: 재생 대기열을 비우고 아무 소리도 내지 않는다.
+                    try:
+                        while not self.audio_in_queue.empty():
+                            self.audio_in_queue.get_nowait()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.05)
+                    continue
                 try:
                     chunk = await asyncio.wait_for(
                         self.audio_in_queue.get(),
@@ -1917,15 +2493,31 @@ class JarvisLive:
                         if callable(send_audio):
                             send_audio(chunk, f"audio/pcm;rate={RECEIVE_SAMPLE_RATE}")
                     elif stream is not None:
-                        await asyncio.to_thread(stream.write, chunk)
+                        try:
+                            await asyncio.to_thread(stream.write, chunk)
+                        except Exception as e:
+                            # 오디오 드라이버가 중간에 사라져도 앱은 유지한다 (무음 모드 전환).
+                            print(f"[AID] ⚠️ 오디오 재생 오류: {e}")
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+                            stream = None
+                            try:
+                                self.ui.write_log("SYS: 오디오 재생을 중단합니다. (대화는 계속됩니다)")
+                            except Exception:
+                                pass
         except Exception as e:
-            print(f"[JARVIS] ❌ Play: {e}")
+            print(f"[AID] ❌ Play: {e}")
             raise
         finally:
             self.set_speaking(False)
             if stream is not None:
-                stream.stop()
-                stream.close()
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
 
     async def run(self):
         api_key = self._api_key or _get_api_key()
@@ -1933,9 +2525,18 @@ class JarvisLive:
             api_key=api_key,
             http_options={"api_version": "v1beta"}
         )
-        live_model = await asyncio.to_thread(pick_live_model, client, API_CONFIG_PATH)
-        live_model_id = live_model.removeprefix("models/")
-        self.ui.write_log(f"SYS: Gemini Live model selected: {live_model_id}")
+        live_model_id = None
+        retry_delay = 2.0
+
+        # ── 세션 복원: 이전 대화 그래프를 로드해서 뷰어에 바로 게시 ──
+        try:
+            from core import graph_store
+            store = graph_store.load()
+            graph_store.publish(store)
+            if store.get("turns"):
+                self.ui.write_log(f"SYS: 🗂️ 이전 대화 그래프 복원 — {graph_store.stats(store)}")
+        except Exception:
+            pass
 
         start_time = time.time()
         while True:
@@ -1945,7 +2546,7 @@ class JarvisLive:
             if self.runtime_limit_seconds is not None:
                 elapsed = time.time() - start_time
                 if elapsed >= float(self.runtime_limit_seconds):
-                    print(f"[JARVIS] ⏱️ Runtime limit reached ({self.runtime_limit_seconds}s). Exiting.")
+                    print(f"[AID] ⏱️ Runtime limit reached ({self.runtime_limit_seconds}s). Exiting.")
                     try:
                         jarvis_status.write_status({"state": "expired"})
                     except Exception:
@@ -1957,23 +2558,31 @@ class JarvisLive:
                 try:
                     path = Path(self.required_unlock_path)
                     if not path.exists():
-                        print(f"[JARVIS] 🔒 Required unlock path not present: {self.required_unlock_path}")
+                        print(f"[AID] 🔒 Required unlock path not present: {self.required_unlock_path}")
                         print("Please mount the locked container (see scripts/create_locked_dmg.sh).")
                         time.sleep(5)
                         continue
                     if self.required_unlock_secret is not None:
                         content = path.read_text(encoding="utf-8").strip()
                         if content != self.required_unlock_secret:
-                            print("[JARVIS] 🔒 unlock.key content does not match expected secret.")
+                            print("[AID] 🔒 unlock.key content does not match expected secret.")
                             print("Please mount the locked container with the correct unlock.key file.")
                             time.sleep(5)
                             continue
                 except Exception as e:
-                    print(f"[JARVIS] 🔒 Locked path check error: {e}")
+                    print(f"[AID] 🔒 Locked path check error: {e}")
                     time.sleep(1)
                     continue
             try:
-                print("[JARVIS] 🔌 Connecting...")
+                if not live_model_id:
+                    try:
+                        live_model = await asyncio.to_thread(pick_live_model, client, API_CONFIG_PATH)
+                        live_model_id = live_model.removeprefix("models/")
+                        self.ui.write_log(f"SYS: WEAID Live model selected: {live_model_id}")
+                    except Exception as model_err:
+                        print(f"[AID] ⚠️ Live model lookup failed: {model_err}")
+                        live_model_id = LIVE_MODEL
+                print("[AID] 🔌 Connecting...")
                 self.ui.set_state("THINKING")
                 config = self._build_config()
 
@@ -1987,9 +2596,31 @@ class JarvisLive:
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
 
-                    print("[JARVIS] ✅ Connected.")
+                    print("[AID] ✅ Connected.")
                     self.ui.set_state("LISTENING")
-                    self.ui.write_log("SYS: JARVIS online.")
+                    self.ui.write_log(f"SYS: {_assistant_name_for_voice(self._get_current_voice())} online.")
+                    # ── 박수 명령 리스너 시작 (헌법 1조) ──
+                    if not self._wake_started:
+                        try:
+                            from core.wake import ClapWakeDetector
+                            self._wake_detector = ClapWakeDetector(
+                                on_wake=self._on_clap_wake,
+                                on_single=self._on_clap_stop,
+                            )
+                            if self._wake_detector.start():
+                                self._wake_started = True
+                                self.ui.write_log("SYS: 👏 박수 1번 = 멈춤 · 박수 2번 = 깨움 (Ctrl+W 수동 웨이크)")
+                        except Exception:
+                            pass
+                    # ── 프로액티브 어시스턴트 시작 (예약 작업 자동 실행) ──
+                    if self._proactive_engine is None:
+                        try:
+                            from core.proactive import ProactiveEngine
+                            self._proactive_engine = ProactiveEngine(on_item=self._on_proactive_item)
+                            if self._proactive_engine.start():
+                                self.ui.write_log("SYS: ⏰ 프로액티브 어시스턴트 활성화 — 예약 작업 시간이 되면 자동 실행합니다.")
+                        except Exception:
+                            pass
                     if not self.cloud_safe:
                         try:
                             jarvis_status.write_status({
@@ -2020,7 +2651,7 @@ class JarvisLive:
                     self.ui.write_log(
                         f"SYS: Voice '{old_voice}' not available. Falling back to {DEFAULT_VOICE_NAME}."
                     )
-                    print(f"[JARVIS] ⚠️ Voice '{old_voice}' unsupported; falling back to {DEFAULT_VOICE_NAME}.")
+                    print(f"[AID] ⚠️ Voice '{old_voice}' unsupported; falling back to {DEFAULT_VOICE_NAME}.")
                     self.ui.sync_voice_display(DEFAULT_VOICE_NAME)
                     if not self.cloud_safe:
                         try:
@@ -2028,15 +2659,29 @@ class JarvisLive:
                         except Exception:
                             pass
                 elif isinstance(actual, genai.errors.APIError) and "1000" in str(actual):
-                    print("[JARVIS] 🔌 Session ended normally.")
+                    print("[AID] 🔌 Session ended normally.")
                     if not self.cloud_safe:
                         try:
                             jarvis_status.write_status({"state": "offline"})
                         except Exception:
                             pass
                 else:
-                    print(f"[JARVIS] ⚠️ {e}")
+                    print(f"[AID] ⚠️ {e}")
                     traceback.print_exc()
+                    # 1008 = 모델을 찾을 수 없음 → 기본 모델로 복귀해서 재시도
+                    if "1008" in str(actual):
+                        live_model_id = LIVE_MODEL
+                        print(f"[AID] 🔄 Model 1008 error — falling back to {LIVE_MODEL}")
+                        self.ui.write_log(f"SYS: 모델 오류 — 기본 모델 {LIVE_MODEL}로 복귀합니다.")
+                    try:
+                        self.ui.write_log(f"SYS: 연결 재시도 중... ({str(actual)[:80]})")
+                    except Exception:
+                        pass
+                # 네트워크/서버 오류가 나도 앱은 유지한다. 지수 백오프 후 재연결.
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30.0)
+            else:
+                retry_delay = 2.0
 
 def main():
     import sys
@@ -2051,15 +2696,15 @@ def main():
     running_as_app = getattr(sys, "frozen", False)
 
     if os.environ.get("JARVIS_CLI") != "1" and not running_as_app:
-        print("[JARVIS] Please launch with the JARVIS CLI: jarvis")
+        print("[AID] Please launch with the AID CLI: jarvis")
         return
     if not wait_for_startup_claps():
         return
-    print("[JARVIS] ⚡ Powering up the interface...")
+    print("[AID] ⚡ Powering up the interface...")
     try:
         ui = JarvisUI("face.png")
     except Exception as exc:
-        print(f"[JARVIS] ❌ Interface startup failed: {exc}")
+        print(f"[AID] ❌ Interface startup failed: {exc}")
         traceback.print_exc()
         return
 
@@ -2068,6 +2713,7 @@ def main():
         voice_name = _load_voice_name()
         jarvis = JarvisLive(ui, voice_name)
         ui.on_quit_requested = jarvis.request_shutdown
+        ui.on_wake_requested = jarvis._on_clap_wake
 
         # Trial/keyword runtime limiting: set via env `JARVIS_TRIAL_KEYWORD`.
         # If set to any non-empty string, jarvis will run for 3600 seconds (1 hour).
@@ -2107,7 +2753,7 @@ def main():
                         voice_id=voice_id,
                     )
                     jarvis.ui.write_log(f"SYS: TTS engine ready: {provider} / {voice_id}")
-                    jarvis.ui.write_log("SYS: Gemini audio muted - using external TTS")
+                    jarvis.ui.write_log("SYS: WEAID audio muted - using external TTS")
                 except Exception as e:
                     jarvis.ui.write_log(f"SYS: TTS engine error: {e}")
                 # Restart session so new TTS takes effect
@@ -2115,25 +2761,30 @@ def main():
                     try:
                         asyncio.run_coroutine_threadsafe(jarvis.session.close(), jarvis._loop)
                     except Exception as e:
-                        print(f"[JARVIS] Could not close session: {e}")
+                        print(f"[AID] Could not close session: {e}")
         ui.on_tts_provider_change = _on_tts_change
-        try:
-            asyncio.run(jarvis.run())
-        except KeyboardInterrupt:
-            print("\n🔴 Shutting down...")
-        except Exception as exc:
-            message = f"Gemini startup failed: {str(exc)[:180]}"
-            print(f"[JARVIS] ❌ {message}")
+        # 네트워크 오류가 나도 UI는 살아 있고, run()을 계속 재시도한다.
+        while True:
             try:
-                ui.write_log(f"ERR: {message}")
-                ui.set_state("LISTENING")
-            except Exception:
-                pass
+                asyncio.run(jarvis.run())
+                break
+            except KeyboardInterrupt:
+                print("\n🔴 Shutting down...")
+                return
+            except Exception as exc:
+                message = f"WEAID startup failed: {str(exc)[:180]}"
+                print(f"[AID] ❌ {message}")
+                try:
+                    ui.write_log(f"ERR: {message}")
+                    ui.set_state("LISTENING")
+                except Exception:
+                    pass
+                time.sleep(5)
 
     threading.Thread(target=runner, daemon=True).start()
-    print("[JARVIS] ✅ Interface ready.")
+    print("[AID] ✅ Interface ready.")
     ui.root.mainloop()
-    print("[JARVIS] Interface closed.")
+    print("[AID] Interface closed.")
 
 def cli_main():
     """Canonical console entry point installed as the `jarvis` command."""
