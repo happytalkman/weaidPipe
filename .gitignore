@@ -100,3 +100,7 @@ exports/
 
 # Next.js 자동 생성 에이전트 가이드
 web/AGENTS.md
+memory/bots.json
+memory/voice_profiles.json
+memory/alarms.json
+memory/scheduled_tasks.json
