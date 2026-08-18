@@ -28,7 +28,7 @@ def grok_key() -> str:
     return os.environ.get("XAI_API_KEY", "").strip()
 
 
-def _call_gemini(system: str, prompt: str, json_mode: bool, timeout_ms: int) -> str:
+def _call_gemini(system: str, prompt: str, json_mode: bool, timeout_ms: int, model: str = "gemini-2.5-flash") -> str:
     from google import genai
     from google.genai import types
 
@@ -40,14 +40,14 @@ def _call_gemini(system: str, prompt: str, json_mode: bool, timeout_ms: int) -> 
     if json_mode:
         config.response_mime_type = "application/json"
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=model,
         contents=prompt,
         config=config,
     )
     return resp.text or ""
 
 
-def _call_grok(system: str, prompt: str, json_mode: bool, timeout_s: int) -> str:
+def _call_grok(system: str, prompt: str, json_mode: bool, timeout_s: int, model: str = "grok-4") -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=grok_key(), base_url=_GROK_BASE_URL, timeout=timeout_s)
@@ -62,31 +62,56 @@ def _call_grok(system: str, prompt: str, json_mode: bool, timeout_s: int) -> str
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     last_err: Exception | None = None
-    for model in _GROK_MODELS:
+    for m in ([model] if model else list(_GROK_MODELS)):
         try:
-            resp = client.chat.completions.create(model=model, **kwargs)
+            resp = client.chat.completions.create(model=m, **kwargs)
             return (resp.choices[0].message.content or "") if resp.choices else ""
         except Exception as e:  # noqa: BLE001
             last_err = e
     raise last_err or RuntimeError("grok call failed")
 
 
-def generate(system: str, prompt: str, json_mode: bool = False, timeout_s: int = 60) -> str:
-    """Generate text with Gemini, falling back to Grok on any failure."""
+def generate(
+    system: str,
+    prompt: str,
+    json_mode: bool = False,
+    timeout_s: int = 60,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Generate text.
+
+    provider=None  → 자동: Gemini 우선, 실패 시 Grok 폴백
+    provider 지정  → 해당 프로바이더만 사용 (봇별 모델 선택용)
+    """
     timeout_ms = max(1000, int(timeout_s * 1000))
     errors: list[str] = []
 
-    if gemini_key():
-        try:
-            return _call_gemini(system, prompt, json_mode, timeout_ms)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"gemini: {str(e)[:120]}")
+    def _try_gemini():
+        return _call_gemini(system, prompt, json_mode, timeout_ms, model=model or "gemini-2.5-flash")
 
-    if grok_key():
-        try:
-            return _call_grok(system, prompt, json_mode, timeout_s)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"grok: {str(e)[:120]}")
+    def _try_grok():
+        return _call_grok(system, prompt, json_mode, timeout_s, model=model or "grok-4")
+
+    if provider == "gemini":
+        if gemini_key():
+            return _try_gemini()
+        errors.append("gemini key missing")
+    elif provider == "grok":
+        if grok_key():
+            return _try_grok()
+        errors.append("grok key missing")
+    else:
+        if gemini_key():
+            try:
+                return _try_gemini()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"gemini: {str(e)[:120]}")
+        if grok_key():
+            try:
+                return _try_grok()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"grok: {str(e)[:120]}")
 
     raise RuntimeError("LLM providers unavailable: " + " | ".join(errors))
 

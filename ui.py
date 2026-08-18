@@ -2281,6 +2281,10 @@ class HudCanvas(QWidget):
         self._spo_mode = "stream"
         self._spo_font_cache: dict[float, QFont] = {}
 
+        # ── 홀로그램 3D 아바타 ───────────────────────────────────────────
+        self._hologram = False
+        self._holo_rot = 0.0
+
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self.set_graphics_quality(get_graphics_quality())
@@ -2299,6 +2303,13 @@ class HudCanvas(QWidget):
         if not self._tmr.isActive():
             self._tmr.start()
         self.update()
+
+    # ── 홀로그램 3D 아바타 ─────────────────────────────────────────────
+    def toggle_hologram(self) -> bool:
+        """홀로그램 모드 켜기/끄기. 새 상태를 반환한다."""
+        self._hologram = not self._hologram
+        self.update()
+        return self._hologram
 
     def _load_face(self, path: str):
         try:
@@ -2492,6 +2503,8 @@ class HudCanvas(QWidget):
             # 조립 후에도 미세하게 부유
             c["x"] += math.sin(self._tick * 0.02 + c["phase"]) * 0.0007
             c["y"] += math.cos(self._tick * 0.017 + c["phase"]) * 0.0005
+        if self._hologram:
+            self._holo_rot += 0.012
         self.update()
 
     def _proj(self, r, theta, phi, sr, cx, cy):
@@ -3247,6 +3260,49 @@ class HudCanvas(QWidget):
             _ny = random.randint(0, H)
             _ns = random.uniform(0.3, 1.0)
             p.fillRect(QRectF(_nx, _ny, _ns, _ns), qcol(C.PRI, _n_a))
+
+        # ═══ LAYER 15.5: 홀로그램 3D 아바타 ═══════════════════════════════
+        if self._hologram:
+            try:
+                from core import hologram as holo
+
+                flick = holo.flicker(self._tick)
+                base_a = int(self._brightness * 150 * flick)
+                if base_a > 4:
+                    holo_r = sphere_r * 1.02
+                    rows = holo.compute_grid(lat=8, lon=16, rot_y=self._holo_rot, rot_x=0.3)
+                    for row in rows:
+                        pts = holo.project(row, cx, cy, holo_r)
+                        for i in range(len(pts) - 1):
+                            x1, y1 = pts[i]
+                            x2, y2 = pts[i + 1]
+                            seg_a = int(base_a * holo.scanline_phase(self._tick, (y1 - cy) / max(holo_r, 1)))
+                            if seg_a < 2:
+                                continue
+                            p.setPen(QPen(qcol(C.ACC2, seg_a), 0.7))
+                            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+                    # 세로(경도) 라인
+                    cols = holo.compute_grid(lat=8, lon=16, rot_y=self._holo_rot, rot_x=0.3)
+                    for j in range(len(cols[0])):
+                        col_pts = [row[j] for row in cols]
+                        pts = holo.project(col_pts, cx, cy, holo_r)
+                        for i in range(len(pts) - 1):
+                            p.setPen(QPen(qcol(C.ACC2, max(0, int(base_a * 0.8))), 0.6))
+                            p.drawLine(QPointF(pts[i][0], pts[i][1]), QPointF(pts[i + 1][0], pts[i + 1][1]))
+                    # 머리 실루엣
+                    sil = [holo.project([(holo.head_profile(t)[0], holo.head_profile(t)[1], 0.0)], cx, cy, holo_r)[0] for t in (i / 48 for i in range(49))]
+                    p.setPen(QPen(qcol(C.ACC2, int(base_a * 1.1)), 1.4))
+                    for i in range(len(sil) - 1):
+                        p.drawLine(QPointF(sil[i][0], sil[i][1]), QPointF(sil[i + 1][0], sil[i + 1][1]))
+                    # 스캔라인
+                    for si in range(14):
+                        sy = cy - holo_r + (2 * holo_r) * si / 13
+                        a = int(base_a * holo.scanline_phase(self._tick, si / 13))
+                        if a > 2:
+                            p.setPen(QPen(qcol(C.ACC2, a), 0.4))
+                            p.drawLine(QPointF(cx - holo_r * 1.1, sy), QPointF(cx + holo_r * 1.1, sy))
+            except Exception:
+                pass
 
         # ═══ LAYER 16: S-P-O 우주 문자 조립 ═══════════════════════════════
         if self._spo_chars:
@@ -8832,6 +8888,7 @@ class MainWindow(QMainWindow):
         return [
             ("마인드맵 열기", "대화 흐름 마인드맵 보기", self._toggle_mindmap),
             ("온톨로지 열기", "SKD 3계층 지식그래프 보기", self._toggle_graph),
+            ("홀로그램 토글", "3D 홀로그램 아바타 켜기/끄기", self._toggle_hologram_ui),
             ("깨우기 (WAKE)", "AID 수동 웨이크업 (Ctrl+W)", self._request_wake),
             ("헌법 검사 패널", "원칙 준수 점수 확인", self._toggle_constitution_panel),
             ("마이크 토글", "음소거 / 해제 (F4)", self._toggle_mute),
@@ -8875,6 +8932,13 @@ class MainWindow(QMainWindow):
                 threading.Thread(target=self.on_wake_requested, daemon=True).start()
             else:
                 self._log.append_log("SYS: 라이브 세션이 연결된 뒤 웨이크업할 수 있습니다.")
+        except Exception:
+            pass
+
+    def _toggle_hologram_ui(self):
+        try:
+            on = self.hud.toggle_hologram()
+            self._log.append_log(f"SYS: 🧿 홀로그램 {'켜짐' if on else '꺼짐'}.")
         except Exception:
             pass
 
@@ -9848,6 +9912,23 @@ class JarvisUI:
                 hud.set_spo_triples(triples)
         except Exception:
             pass
+
+    def set_hologram(self, on: bool | None = None) -> bool:
+        """홀로그램 모드 설정/토글. 새 상태를 반환한다."""
+        try:
+            hud = getattr(self._win, "hud", None)
+            if hud is None:
+                return False
+            if on is None:
+                return hud.toggle_hologram()
+            hud._hologram = bool(on)
+            hud.update()
+            return bool(on)
+        except Exception:
+            return False
+
+    def toggle_hologram(self) -> bool:
+        return self.set_hologram(None)
 
     def clear_subtitle(self):
         """Thread-safe subtitle clear."""

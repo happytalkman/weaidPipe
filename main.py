@@ -1265,6 +1265,9 @@ class JarvisLive:
         self._wake_detector = None                 # 박수 웨이크업 감지기
         self._wake_started  = False
         self._proactive_engine = None              # 프로액티브 어시스턴트
+        self._alarm_manager = None                 # 알람/타이머 매니저
+        self._mic_audio: list = []                  # 화자 식별용 마이크 버퍼
+        self._last_speaker_id: str | None = None
         self.voice_name     = voice_name
         # optional runtime limit in seconds (set by main)
         self.runtime_limit_seconds: int | None = None
@@ -1325,6 +1328,18 @@ class JarvisLive:
             self._handle_graph_query(_gq)
             return True
         if self._handle_schedule_command(self._current_input_transcript):
+            return True
+        if self._handle_hologram_command(self._current_input_transcript):
+            return True
+        if self._handle_name_command(self._current_input_transcript):
+            return True
+        if self._handle_bot_command(self._current_input_transcript):
+            return True
+        if self._handle_minutes_command(self._current_input_transcript):
+            return True
+        if self._handle_report_command(self._current_input_transcript):
+            return True
+        if self._handle_alarm_command(self._current_input_transcript):
             return True
         _wq = extract_why_query(self._current_input_transcript)
         if _wq is not None and self._handle_why_query(_wq):
@@ -1493,6 +1508,261 @@ class JarvisLive:
                 pass
         except Exception as e:
             self.ui.write_log(f"SYS: 그래프 탐색 실패: {str(e)[:100]}")
+
+    def _analyze_speaker_async(self):
+        """화자 식별 (백그라운드): 마이크 버퍼의 음향 특징으로 프로필 분류/등록."""
+        try:
+            import numpy as np
+            from core import voice_profile as vp
+
+            with self._speaking_lock:
+                buf = list(self._mic_audio)
+                self._mic_audio = []
+            if not buf:
+                return
+            samples = np.concatenate(buf) if len(buf) > 1 else buf[0]
+            features = vp.extract_features([float(x) for x in samples[: SEND_SAMPLE_RATE * 4]], SEND_SAMPLE_RATE)
+            if features.get("pitch", 0) <= 0:
+                return
+            profiles = vp.load_profiles()
+            pid = vp.classify(features, profiles)
+            if pid:
+                self._last_speaker_id = pid
+                for p in profiles:
+                    if p.get("id") == pid:
+                        vp.update_profile(p, features)
+                        vp.save_profiles(profiles)
+                        label = p.get("name") or pid
+                        self.ui.write_log(f"SYS: 🗣️ 화자 인식: {label}")
+                        break
+            else:
+                profile = vp.new_profile(features=features)
+                profiles.append(profile)
+                vp.save_profiles(profiles)
+                self._last_speaker_id = profile["id"]
+                self.ui.write_log(
+                    f"SYS: 🗣️ 새 화자 감지 (ID: {profile['id']}) — '내 이름은 OO야'라고 말씀해 주시면 등록합니다."
+                )
+        except Exception:
+            pass
+
+    def _handle_name_command(self, text: str) -> bool:
+        """'내 이름은 OO야' → 마지막 감지 화자 프로필에 이름 등록."""
+        import re
+        m = re.search(r"(?:내|제)\s*이름은\s*(.+?)(?:야|이야|입니다|이에요)?\s*$", str(text or "").strip())
+        if not m:
+            return False
+        name = m.group(1).strip()
+        if not name:
+            return False
+        try:
+            from core import voice_profile as vp
+            profiles = vp.load_profiles()
+            if self._last_speaker_id and vp.name_profile(profiles, self._last_speaker_id, name):
+                vp.save_profiles(profiles)
+                self.ui.write_log(f"SYS: ✅ 화자 프로필 등록 완료 — {name} 님.")
+            else:
+                self.ui.write_log("SYS: 등록할 화자 프로필이 없습니다. 먼저 말씀해 주세요.")
+            return True
+        except Exception:
+            return False
+
+    def _handle_bot_command(self, text: str) -> bool:
+        """Bot Mode 명령: 생성/목록/삭제/질문/봇간 대화. 처리했으면 True."""
+        try:
+            from core import bots
+
+            cmd, payload = bots.parse_bot_command(text)
+            if cmd == "list":
+                all_bots = bots.load_bots()
+                if not all_bots:
+                    self.ui.write_log("SYS: 등록된 봇이 없습니다. '봇 만들어줘 이름:OO 역할:OO'로 생성하세요.")
+                else:
+                    self.ui.write_log(f"SYS: 🤖 봇 {len(all_bots)}개:")
+                    for b in all_bots:
+                        self.ui.write_log(f"SYS:   [{b['id']}] {b['name']} — {b['provider']}/{b['model']} · {b['role'][:40]}")
+                return True
+            if cmd == "create":
+                b = bots.new_bot(payload["name"], payload.get("role", ""))
+                store = bots.load_bots()
+                store.append(b)
+                bots.save_bots(store)
+                self.ui.write_log(f"SYS: 🤖 봇 생성 완료 — {b['name']} ({b['provider']}/{b['model']}).")
+                return True
+            if cmd == "delete":
+                store = bots.load_bots()
+                if bots.delete_bot(store, payload["key"]):
+                    bots.save_bots(store)
+                    self.ui.write_log(f"SYS: 🗑️ 봇 삭제 완료 — {payload['key']}")
+                else:
+                    self.ui.write_log(f"SYS: 해당 봇을 찾지 못했습니다 — {payload['key']}")
+                return True
+            if cmd == "ask":
+                threading.Thread(target=self._bot_ask_async, args=(payload["bot"], payload["message"]), daemon=True).start()
+                return True
+            if cmd == "chat":
+                threading.Thread(
+                    target=self._bot_chat_async,
+                    args=(payload["bot_a"], payload["bot_b"], payload["topic"]),
+                    daemon=True,
+                ).start()
+                return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 봇 처리 실패: {str(e)[:100]}")
+        return False
+
+    def _bot_ask_async(self, bot_key: str, message: str):
+        try:
+            from core import bots
+            store = bots.load_bots()
+            bot = bots.get_bot(store, bot_key)
+            if bot is None:
+                self.ui.write_log(f"SYS: 봇을 찾지 못했습니다 — {bot_key}")
+                return
+            self.ui.write_log(f"SYS: 🤖 {bot['name']}에게 질문 중...")
+            answer = bots.bot_reply(bot, message)
+            bots.save_bots(store)
+            self.ui.write_log(f"🤖 {bot['name']}: {answer}")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 봇 응답 실패: {str(e)[:100]}")
+
+    def _bot_chat_async(self, bot_a: str, bot_b: str, topic: str):
+        try:
+            from core import bots
+            store = bots.load_bots()
+            a = bots.get_bot(store, bot_a)
+            b = bots.get_bot(store, bot_b)
+            if a is None or b is None:
+                self.ui.write_log("SYS: 대화할 봇을 찾지 못했습니다.")
+                return
+            self.ui.write_log(f"SYS: 🤖 {a['name']} ↔ {b['name']} 대화 시작 (주제: {topic or '자유'})...")
+            transcript = bots.bot_dialogue(a, b, topic or "협업 주제")
+            bots.save_bots(store)
+            for turn in transcript:
+                self.ui.write_log(f"🤖 {turn['bot']}: {turn['text']}")
+            self.ui.write_log("SYS: 🤖 봇 협업 대화 완료.")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 봇 대화 실패: {str(e)[:100]}")
+
+    def _handle_minutes_command(self, text: str) -> bool:
+        """회의록 작성. 처리했으면 True."""
+        from core.minutes import extract_minutes_command
+        if not extract_minutes_command(text):
+            return False
+        threading.Thread(target=self._minutes_async, daemon=True).start()
+        return True
+
+    def _minutes_async(self):
+        try:
+            from core import graph_store, minutes
+            store = graph_store.load()
+            turns = store.get("turns", [])
+            if len(turns) < 2:
+                self.ui.write_log("SYS: 회의록을 작성할 대화가 부족합니다.")
+                return
+            self.ui.write_log("SYS: 📋 회의록 작성 중...")
+            md = None
+            data = minutes.generate_minutes(turns)
+            if data:
+                md = minutes.minutes_to_markdown(data)
+            else:
+                md = minutes.local_minutes(turns)
+            path = minutes.write_minutes(md)
+            self.ui.write_log(f"SYS: ✅ 회의록 저장 완료 — {path}")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 회의록 작성 실패: {str(e)[:100]}")
+
+    def _handle_report_command(self, text: str) -> bool:
+        """보고서 생성. 처리했으면 True."""
+        from core.reporter import extract_report_command
+        if not extract_report_command(text):
+            return False
+        threading.Thread(target=self._report_async, daemon=True).start()
+        return True
+
+    def _report_async(self):
+        try:
+            from core import graph_store, reporter
+            store = graph_store.load()
+            self.ui.write_log("SYS: 📄 보고서 생성 중...")
+            md = None
+            data = reporter.generate_report(store)
+            if data:
+                md = reporter.report_to_markdown(data)
+            else:
+                md = reporter.local_report(store)
+            path = reporter.write_report(md)
+            self.ui.write_log(f"SYS: ✅ 보고서 저장 완료 — {path}")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 보고서 생성 실패: {str(e)[:100]}")
+
+    def _handle_alarm_command(self, text: str) -> bool:
+        """알람/타이머 등록·목록·취소. 처리했으면 True."""
+        try:
+            from datetime import datetime, timedelta
+            from core import alarms
+            t = str(text or "")
+            if any(k in t for k in ("알람 목록", "타이머 목록")):
+                all_a = alarms.load_alarms()
+                pending = [a for a in all_a if not a.get("fired")]
+                if not pending:
+                    self.ui.write_log("SYS: 예약된 알람/타이머가 없습니다.")
+                else:
+                    self.ui.write_log(f"SYS: ⏰ 알람 {len(pending)}건:")
+                    for a in pending:
+                        self.ui.write_log(f"SYS:   {alarms.alarm_description(a)}")
+                return True
+            m = re.search(r"(?:알람|타이머)\s*(?:취소|삭제|지워)\s*(?:해줘|줘)?\s*([0-9a-f]{6,8})", t)
+            if m and ("취소" in t or "삭제" in t):
+                if alarms.remove_alarm(m.group(1)):
+                    self.ui.write_log(f"SYS: 🗑️ 알람 취소 완료 — {m.group(1)}")
+                else:
+                    self.ui.write_log(f"SYS: 해당 알람을 찾지 못했습니다 — {m.group(1)}")
+                return True
+            if any(k in t for k in ("알려", "타이머", "알람")):
+                secs = alarms.parse_duration(t)
+                if secs:
+                    due = datetime.now() + timedelta(seconds=secs)
+                    a = alarms.add_alarm(due, f"타이머 {secs}초")
+                    self.ui.write_log(f"SYS: ⏰ 타이머 설정 완료 ({secs}초 후) — ID: {a['id']}")
+                    return True
+                due = alarms.parse_alarm_time(t)
+                if due:
+                    a = alarms.add_alarm(due, "알람")
+                    self.ui.write_log(f"SYS: ⏰ 알람 설정 완료 ({due.strftime('%H:%M')}) — ID: {a['id']}")
+                    return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 알람 처리 실패: {str(e)[:100]}")
+        return False
+
+    def _on_alarm_fire(self, alarm: dict):
+        """알람 발화: 로그 + 음성 안내."""
+        label = str(alarm.get("label", "알람"))
+        self.ui.write_log(f"SYS: 🔔 알람! — {label}")
+        if not self._hard_stop.is_set() and self.session and self._loop:
+            self.speak(
+                "[SCHEDULED ALARM] The alarm is ringing. Announce it briefly in Korean: "
+                + json.dumps(label, ensure_ascii=False)
+            )
+
+    def _handle_hologram_command(self, text: str) -> bool:
+        """'홀로그램 켜줘/꺼줘' 로컬 명령 처리. 처리했으면 True."""
+        t = str(text or "")
+        if "홀로그램" not in t:
+            return False
+        try:
+            if "꺼" in t:
+                self.ui.set_hologram(False)
+                self.ui.write_log("SYS: 🧿 홀로그램 꺼짐.")
+            elif "켜" in t:
+                self.ui.set_hologram(True)
+                self.ui.write_log("SYS: 🧿 홀로그램 켜짐.")
+            else:
+                on = self.ui.toggle_hologram()
+                self.ui.write_log(f"SYS: 🧿 홀로그램 {'켜짐' if on else '꺼짐'}.")
+            return True
+        except Exception:
+            return False
 
     def _handle_schedule_command(self, text: str) -> bool:
         """예약 명령 처리: 추가/목록/취소. 처리했으면 True."""
@@ -1829,6 +2099,11 @@ class JarvisLive:
         try:
             if self._proactive_engine is not None:
                 self._proactive_engine.stop()
+        except Exception:
+            pass
+        try:
+            if self._alarm_manager is not None:
+                self._alarm_manager.stop()
         except Exception:
             pass
         try:
@@ -2258,6 +2533,18 @@ class JarvisLive:
             if self._hard_stop.is_set():
                 # 헌법 STOP: API로 오디오를 전송하지 않는다 (호출 전 중단).
                 continue
+            # 화자 식별용 마이크 버퍼 축적 (최근 ~5초)
+            try:
+                import numpy as np
+                raw = msg.get("data")
+                if isinstance(raw, (bytes, bytearray)) and len(raw) >= 64:
+                    arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                    self._mic_audio.append(arr)
+                    total = sum(len(a) for a in self._mic_audio)
+                    while total > 5 * SEND_SAMPLE_RATE and self._mic_audio:
+                        total -= len(self._mic_audio.pop(0))
+            except Exception:
+                pass
             await self.session.send_realtime_input(media=msg)
 
     async def _listen_audio(self):
@@ -2352,6 +2639,18 @@ class JarvisLive:
                                             in_buf = []
                                         elif self._handle_schedule_command(self._current_input_transcript):
                                             in_buf = []
+                                        elif self._handle_hologram_command(self._current_input_transcript):
+                                            in_buf = []
+                                        elif self._handle_name_command(self._current_input_transcript):
+                                            in_buf = []
+                                        elif self._handle_bot_command(self._current_input_transcript):
+                                            in_buf = []
+                                        elif self._handle_minutes_command(self._current_input_transcript):
+                                            in_buf = []
+                                        elif self._handle_report_command(self._current_input_transcript):
+                                            in_buf = []
+                                        elif self._handle_alarm_command(self._current_input_transcript):
+                                            in_buf = []
                                         else:
                                             _wq = extract_why_query(self._current_input_transcript)
                                             if _wq is not None and self._handle_why_query(_wq):
@@ -2373,6 +2672,11 @@ class JarvisLive:
                                 self._current_input_transcript = full_in
                                 self._last_input_transcript = full_in
                                 self._last_input_transcript_at = time.monotonic()
+                                # 화자 식별 (백그라운드)
+                                try:
+                                    threading.Thread(target=self._analyze_speaker_async, daemon=True).start()
+                                except Exception:
+                                    pass
                                 if (
                                     not getattr(self, "_pending_self_quit", False)
                                     and self._is_explicit_self_quit_transcript(full_in)
@@ -2619,6 +2923,15 @@ class JarvisLive:
                             self._proactive_engine = ProactiveEngine(on_item=self._on_proactive_item)
                             if self._proactive_engine.start():
                                 self.ui.write_log("SYS: ⏰ 프로액티브 어시스턴트 활성화 — 예약 작업 시간이 되면 자동 실행합니다.")
+                        except Exception:
+                            pass
+                    # ── 알람/타이머 매니저 시작 ──
+                    if self._alarm_manager is None:
+                        try:
+                            from core.alarms import AlarmManager
+                            self._alarm_manager = AlarmManager(on_fire=self._on_alarm_fire)
+                            if self._alarm_manager.start():
+                                self.ui.write_log("SYS: 🔔 알람/타이머 매니저 활성화.")
                         except Exception:
                             pass
                     if not self.cloud_safe:
