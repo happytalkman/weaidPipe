@@ -1266,8 +1266,10 @@ class JarvisLive:
         self._wake_started  = False
         self._proactive_engine = None              # 프로액티브 어시스턴트
         self._alarm_manager = None                 # 알람/타이머 매니저
+        self._audio_retry = None                   # 오디오 자동 복구 정책
         self._mic_audio: list = []                  # 화자 식별용 마이크 버퍼
         self._last_speaker_id: str | None = None
+        self._last_tone = "neutral"                 # B4 톤 인식 결과
         self.voice_name     = voice_name
         # optional runtime limit in seconds (set by main)
         self.runtime_limit_seconds: int | None = None
@@ -1335,11 +1337,19 @@ class JarvisLive:
             return True
         if self._handle_bot_command(self._current_input_transcript):
             return True
+        if self._handle_pipeline_command(self._current_input_transcript):
+            return True
+        if self._handle_bot_eval_command(self._current_input_transcript):
+            return True
         if self._handle_minutes_command(self._current_input_transcript):
             return True
         if self._handle_report_command(self._current_input_transcript):
             return True
         if self._handle_alarm_command(self._current_input_transcript):
+            return True
+        if self._handle_rag_command(self._current_input_transcript):
+            return True
+        if self._handle_agent_command(self._current_input_transcript):
             return True
         _wq = extract_why_query(self._current_input_transcript)
         if _wq is not None and self._handle_why_query(_wq):
@@ -1526,6 +1536,14 @@ class JarvisLive:
                 return
             profiles = vp.load_profiles()
             pid = vp.classify(features, profiles)
+            # B4: 톤 인식
+            try:
+                from core import settings as _st, tone as _tone
+                if _st.get("tone_aware"):
+                    self._last_tone = _tone.classify_tone(features)
+                    self.ui.write_log(f"SYS: 🎭 톤: {self._last_tone}")
+            except Exception:
+                pass
             if pid:
                 self._last_speaker_id = pid
                 for p in profiles:
@@ -1613,7 +1631,7 @@ class JarvisLive:
 
     def _bot_ask_async(self, bot_key: str, message: str):
         try:
-            from core import bots
+            from core import bots, bot_eval
             store = bots.load_bots()
             bot = bots.get_bot(store, bot_key)
             if bot is None:
@@ -1623,8 +1641,61 @@ class JarvisLive:
             answer = bots.bot_reply(bot, message)
             bots.save_bots(store)
             self.ui.write_log(f"🤖 {bot['name']}: {answer}")
+            # C3: 자동 평가
+            try:
+                ev = bot_eval.evaluate_and_store(bot["name"], message, answer)
+                self.ui.write_log(f"SYS: 📊 봇 평가 — {bot['name']} {ev['score']}/100 ({', '.join(ev['reasons'])})")
+            except Exception:
+                pass
         except Exception as e:
             self.ui.write_log(f"SYS: 봇 응답 실패: {str(e)[:100]}")
+
+    def _handle_pipeline_command(self, text: str) -> bool:
+        """C2: '봇 A B 순서대로 처리해줘: ...' 파이프라인 실행."""
+        try:
+            import re
+            from core import orchestrator
+            if not orchestrator.is_pipeline_command(text):
+                return False
+            m = re.search(r"봇\s*([^\s]+)\s+([^\s]+)\s*순서대로\s*처리해줘[:：\s]*(.*)", text)
+            if not m:
+                return False
+            bot_a, bot_b, topic = m.group(1), m.group(2), (m.group(3) or "").strip()
+            threading.Thread(
+                target=self._pipeline_async, args=([bot_a, bot_b], topic), daemon=True
+            ).start()
+            return True
+        except Exception:
+            return False
+
+    def _pipeline_async(self, stage_bots: list, input_text: str):
+        try:
+            from core import bots, orchestrator
+            store = bots.load_bots()
+            self.ui.write_log(f"SYS: 🔄 파이프라인 시작 — {' → '.join(stage_bots)} (입력: {input_text or '없음'})")
+            results = orchestrator.build_pipeline(store, stage_bots, input_text or "처리할 작업")
+            bots.save_bots(store)
+            self.ui.write_log(orchestrator.pipeline_summary(results))
+        except Exception as e:
+            self.ui.write_log(f"SYS: 파이프라인 실패: {str(e)[:100]}")
+
+    def _handle_bot_eval_command(self, text: str) -> bool:
+        """C3: '봇 평가 보여줘' → 봇별 평균 점수."""
+        t = str(text or "")
+        if "봇" not in t or "평가" not in t:
+            return False
+        try:
+            from core import bot_eval
+            avg = bot_eval.average_scores()
+            if not avg:
+                self.ui.write_log("SYS: 아직 평가 기록이 없습니다. 봇에게 질문하면 자동 평가됩니다.")
+            else:
+                self.ui.write_log("SYS: 📊 봇 평가 순위:")
+                for bot_name, score in bot_eval.rank_bots({k: int(v) for k, v in avg.items()}):
+                    self.ui.write_log(f"SYS:   {bot_name} — {score}점")
+            return True
+        except Exception:
+            return False
 
     def _bot_chat_async(self, bot_a: str, bot_b: str, topic: str):
         try:
@@ -1654,6 +1725,7 @@ class JarvisLive:
 
     def _minutes_async(self):
         try:
+            from datetime import datetime
             from core import graph_store, minutes
             store = graph_store.load()
             turns = store.get("turns", [])
@@ -1669,6 +1741,14 @@ class JarvisLive:
                 md = minutes.local_minutes(turns)
             path = minutes.write_minutes(md)
             self.ui.write_log(f"SYS: ✅ 회의록 저장 완료 — {path}")
+            # D3: Obsidian 자동 동기화
+            try:
+                from core import exporters
+                synced = exporters.sync_to_obsidian(md, "회의록 " + datetime.now().strftime("%m%d-%H%M"))
+                if synced:
+                    self.ui.write_log(f"SYS: 📓 Obsidian 동기화 완료 — {synced}")
+            except Exception:
+                pass
         except Exception as e:
             self.ui.write_log(f"SYS: 회의록 작성 실패: {str(e)[:100]}")
 
@@ -1682,6 +1762,7 @@ class JarvisLive:
 
     def _report_async(self):
         try:
+            from datetime import datetime
             from core import graph_store, reporter
             store = graph_store.load()
             self.ui.write_log("SYS: 📄 보고서 생성 중...")
@@ -1693,6 +1774,14 @@ class JarvisLive:
                 md = reporter.local_report(store)
             path = reporter.write_report(md)
             self.ui.write_log(f"SYS: ✅ 보고서 저장 완료 — {path}")
+            # D3: Obsidian 자동 동기화
+            try:
+                from core import exporters
+                synced = exporters.sync_to_obsidian(md, "보고서 " + datetime.now().strftime("%m%d-%H%M"), ["WEAID", "report"])
+                if synced:
+                    self.ui.write_log(f"SYS: 📓 Obsidian 동기화 완료 — {synced}")
+            except Exception:
+                pass
         except Exception as e:
             self.ui.write_log(f"SYS: 보고서 생성 실패: {str(e)[:100]}")
 
@@ -1736,14 +1825,85 @@ class JarvisLive:
         return False
 
     def _on_alarm_fire(self, alarm: dict):
-        """알람 발화: 로그 + 음성 안내."""
+        """알람 발화: 로그 + 음성 안내 + Windows 토스트(A2)."""
         label = str(alarm.get("label", "알람"))
         self.ui.write_log(f"SYS: 🔔 알람! — {label}")
+        try:
+            from core import applog, notify
+            if notify.notify("WEAID 알람", label):
+                applog.log_write(f"alarm fired: {label}", "INFO")
+        except Exception:
+            pass
         if not self._hard_stop.is_set() and self.session and self._loop:
             self.speak(
                 "[SCHEDULED ALARM] The alarm is ringing. Announce it briefly in Korean: "
                 + json.dumps(label, ensure_ascii=False)
             )
+
+    def _handle_rag_command(self, text: str) -> bool:
+        """B2: '내 문서에서 OO 찾아줘' → 로컬 RAG 검색."""
+        try:
+            import os
+            from pathlib import Path
+            from core import rag
+            query = rag.extract_rag_command(text)
+            if not query:
+                return False
+            docs_dir = os.environ.get("WEAID_DOCS_DIR") or str(Path.home() / "Documents")
+            threading.Thread(target=self._rag_async, args=(query, docs_dir), daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    def _rag_async(self, query: str, docs_dir: str):
+        try:
+            from core import rag
+            self.ui.write_log(f"SYS: 📚 문서 검색 중 — '{query}'")
+            docs = rag.load_documents(docs_dir)
+            if not docs:
+                self.ui.write_log(f"SYS: 검색할 문서가 없습니다 ({docs_dir}).")
+                return
+            ctx = rag.context_for(query, docs)
+            if not ctx:
+                self.ui.write_log(f"SYS: '{query}' 관련 문서를 찾지 못했습니다.")
+                return
+            self.ui.write_log("SYS: 📚 " + ctx.replace(chr(10), chr(10) + "SYS:   "))
+            if not self._hard_stop.is_set():
+                self._speak_why_result(ctx[:500])
+        except Exception as e:
+            self.ui.write_log(f"SYS: 문서 검색 실패: {str(e)[:100]}")
+
+    def _handle_agent_command(self, text: str) -> bool:
+        """B3: '에이전트로 처리해줘: ...' → 계획-실행-검증 루프."""
+        import re
+        t = str(text or "")
+        if "에이전트" not in t:
+            return False
+        m = re.search(r"(?:에이전트로\s*)?처리해줘[:：\s]*(.+)", t)
+        if not m:
+            return False
+        goal = m.group(1).strip()
+        threading.Thread(target=self._agent_async, args=(goal,), daemon=True).start()
+        return True
+
+    def _agent_async(self, goal: str):
+        try:
+            from core import agent_loop, llm
+            self.ui.write_log(f"SYS: 🧭 에이전트 루프 시작 — 목표: {goal}")
+            tools = ["web_search", "file_controller", "graph_query", "win_app_control"]
+
+            def executor(instruction: str) -> str:
+                return llm.generate(
+                    "당신은 목표 지향 에이전트입니다. 지시에 따라 한 단계만 수행하고 결과를 요약하세요.",
+                    instruction,
+                    timeout_s=60,
+                )
+
+            out = agent_loop.run_loop(goal, tools, executor, max_iterations=3)
+            self.ui.write_log(f"SYS: 🧭 루프 종료 — {'완료' if out['completed'] else '부분 완료'} ({out['iterations']}회)")
+            self.ui.write_log(f"에이전트: {out['result']}")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 에이전트 루프 실패: {str(e)[:100]}")
 
     def _handle_hologram_command(self, text: str) -> bool:
         """'홀로그램 켜줘/꺼줘' 로컬 명령 처리. 처리했으면 True."""
@@ -1917,6 +2077,14 @@ class JarvisLive:
             self.ui.write_log(
                 f"SYS: 📝 대화 요약 노드 생성 — {summary.get('start_turn')}~{summary.get('end_turn')}턴"
             )
+            # A2: 요약 완료 토스트
+            try:
+                from core import applog, notify, settings
+                if settings.get("notifications_on"):
+                    notify.notify("WEAID 요약", f"{summary.get('start_turn')}~{summary.get('end_turn')}턴 대화 요약 완료")
+                applog.log_write("conversation summarized", "INFO")
+            except Exception:
+                pass
             try:
                 self.ui.set_mindmap_data({
                     "question": store.get("turns", [{}])[-1].get("text", "") if store.get("turns") else "",
@@ -1989,6 +2157,15 @@ class JarvisLive:
             graph_store.merge_insight(store, insight)
             graph_store.save(store)
             graph_store.publish(store)
+            # B1: 장기 기억 추출·저장
+            try:
+                from core import long_memory
+                entries = long_memory.load_memory()
+                for cand in long_memory.extract_memory_candidates(question, answer):
+                    long_memory.add_memory(entries, cand)
+                long_memory.save_memory(entries)
+            except Exception:
+                pass
             # HUD 중앙에 구조화된 S-P-O 조립 애니메이션 표시
             try:
                 self.ui.show_hud_spo_triples(insight.get("triples") or [])
@@ -2017,6 +2194,11 @@ class JarvisLive:
             })
             self.ui.write_log(f"SYS: 🧠 딥 그래프 갱신 완료 ({graph_store.stats(store)}).")
         except Exception as e:
+            try:
+                from core import applog
+                applog.ErrorCollector.record(str(e), "insight")
+            except Exception:
+                pass
             self.ui.write_log(f"SYS: 인사이트 처리 실패: {str(e)[:120]}")
 
     @staticmethod
@@ -2216,6 +2398,18 @@ class JarvisLive:
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
+        # B1: 장기 기억 컨텍스트 주입
+        try:
+            from core import long_memory, tone
+            lm_ctx = long_memory.memory_context(long_memory.load_memory())
+            if lm_ctx:
+                parts.append(lm_ctx)
+            if getattr(self, "_last_tone", "neutral") != "neutral":
+                tg = tone.tone_guidance(self._last_tone)
+                if tg:
+                    parts.append(tg)
+        except Exception:
+            pass
         parts.append(sys_prompt)
 
         return types.LiveConnectConfig(
@@ -2800,7 +2994,7 @@ class JarvisLive:
                         try:
                             await asyncio.to_thread(stream.write, chunk)
                         except Exception as e:
-                            # 오디오 드라이버가 중간에 사라져도 앱은 유지한다 (무음 모드 전환).
+                            # 오디오 드라이버가 중간에 사라져도 앱은 유지 (무음 + 자동 복구)
                             print(f"[AID] ⚠️ 오디오 재생 오류: {e}")
                             try:
                                 stream.close()
@@ -2808,9 +3002,33 @@ class JarvisLive:
                                 pass
                             stream = None
                             try:
-                                self.ui.write_log("SYS: 오디오 재생을 중단합니다. (대화는 계속됩니다)")
+                                from core import audio_health
+                                self._audio_retry = audio_health.RetryPolicy(base_seconds=15.0)
+                                self._audio_retry.on_failure()
                             except Exception:
                                 pass
+                            try:
+                                self.ui.write_log("SYS: 오디오 장치 손실 — 무음 모드로 전환, 자동 복구를 시도합니다.")
+                            except Exception:
+                                pass
+                    elif self._audio_retry is not None and self._audio_retry.should_retry():
+                        # A4: 지수 백오프 후 오디오 스트림 재생성 시도
+                        try:
+                            import sounddevice as _sd
+                            stream = _sd.RawOutputStream(
+                                samplerate=RECEIVE_SAMPLE_RATE,
+                                channels=CHANNELS,
+                                dtype="int16",
+                                blocksize=CHUNK_SIZE,
+                            )
+                            stream.start()
+                            self._audio_retry.on_success()
+                            self._audio_retry = None
+                            self.ui.write_log("SYS: 🔊 오디오 장치 복구 — 음성 재생을 재개합니다.")
+                            self.set_speaking(True)
+                            await asyncio.to_thread(stream.write, chunk)
+                        except Exception:
+                            self._audio_retry.on_failure()
         except Exception as e:
             print(f"[AID] ❌ Play: {e}")
             raise
@@ -2919,8 +3137,10 @@ class JarvisLive:
                     # ── 프로액티브 어시스턴트 시작 (예약 작업 자동 실행) ──
                     if self._proactive_engine is None:
                         try:
+                            from core import settings as _st
                             from core.proactive import ProactiveEngine
-                            self._proactive_engine = ProactiveEngine(on_item=self._on_proactive_item)
+                            interval = int(_st.get("proactive_interval") or 30)
+                            self._proactive_engine = ProactiveEngine(on_item=self._on_proactive_item, interval_seconds=interval)
                             if self._proactive_engine.start():
                                 self.ui.write_log("SYS: ⏰ 프로액티브 어시스턴트 활성화 — 예약 작업 시간이 되면 자동 실행합니다.")
                         except Exception:
@@ -2928,8 +3148,10 @@ class JarvisLive:
                     # ── 알람/타이머 매니저 시작 ──
                     if self._alarm_manager is None:
                         try:
+                            from core import settings as _st
                             from core.alarms import AlarmManager
-                            self._alarm_manager = AlarmManager(on_fire=self._on_alarm_fire)
+                            interval = int(_st.get("alarm_interval") or 5)
+                            self._alarm_manager = AlarmManager(on_fire=self._on_alarm_fire, interval_seconds=interval)
                             if self._alarm_manager.start():
                                 self.ui.write_log("SYS: 🔔 알람/타이머 매니저 활성화.")
                         except Exception:

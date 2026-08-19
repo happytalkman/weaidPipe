@@ -182,6 +182,34 @@ def self_improve_reports() -> list[dict]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/ontology/trends")
+def ontology_trends(q: str = "", granularity: str = "hour") -> dict:
+    """D2: 주제 트렌드 (버킷별 상위 주제 + 특정 주제 추세)."""
+    try:
+        from core import graph_store, trends
+        store = graph_store.load()
+        buckets = trends.topic_buckets(store, granularity=granularity or "hour")
+        trend = None
+        if q:
+            trend = trends.topic_trend(store, q, granularity=granularity or "hour")
+        return {"buckets": buckets, "trend": trend}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/ontology/search")
+def ontology_search(q: str = "") -> dict:
+    """D1: 온톨로지 웹 탐색 (라벨 기반 서브그래프 검색)."""
+    try:
+        from core import graph_store
+        store = graph_store.load()
+        if not q:
+            return {"term": "", "matched": [], "entities": [], "relations": []}
+        return graph_store.query(store, [q])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/ontology/rdf")
 def ontology_rdf() -> PlainTextResponse:
     """RDF/OWL2 (Turtle) 온톨로지 내보내기."""

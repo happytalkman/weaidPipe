@@ -505,6 +505,11 @@ window.addEventListener("message", (e) => {
   if (!d || typeof d !== "object") return;
   if (d.type === "graph") {
     renderMindmap(d.data || {});
+  } else if (d.type === "focus") {
+    // D1: 웹 검색 포커스 — 서브그래프 중심 재렌더
+    if (d.focus && d.focus.matched && d.focus.matched.length) {
+      renderGraph(window.__FULL_DATA || d.focus, d.focus);
+    }
   } else if (d.type === "mode") {
     if (d.mode === "graph") renderGraph(d.data || window.__FULL_DATA || {});
     else renderMindmap(d.data || {});

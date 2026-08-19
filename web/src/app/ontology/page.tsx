@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws/ontology";
-const RDF_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000") + "/ontology/rdf";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const RDF_URL = API + "/ontology/rdf";
 
 type GraphStats = { turns: number; topics: number; entities: number; relations: number };
 
@@ -12,11 +13,27 @@ export default function OntologyPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState("연결 중…");
   const [stats, setStats] = useState<GraphStats | null>(null);
+  const [query, setQuery] = useState("");
 
   const post = useCallback((msg: unknown) => {
     const frame = iframeRef.current;
     if (frame?.contentWindow) frame.contentWindow.postMessage(msg, "*");
   }, []);
+
+  // D1: 웹 탐색 — 백엔드 서브그래프 검색 → 뷰어 포커스
+  const search = useCallback(async () => {
+    const q = query.trim();
+    if (!q) return;
+    try {
+      const res = await fetch(`${API}/ontology/search?q=${encodeURIComponent(q)}`);
+      const focus = await res.json();
+      if (frame()) post({ type: "focus", focus });
+    } catch {
+      /* 무시 */
+    }
+  }, [query, post]);
+
+  const frame = () => iframeRef.current?.contentWindow;
 
   useEffect(() => {
     let disposed = false;
@@ -58,19 +75,32 @@ export default function OntologyPage() {
 
   return (
     <main className="flex h-screen flex-col bg-[#04060c] text-[#eaf0ff]">
-      <header className="flex flex-wrap items-center gap-3 border-b border-cyan-400/10 bg-[#0a1224]/55 px-6 py-3 backdrop-blur-xl">
+      <header className="flex flex-wrap items-center gap-3 border-b border-cyan-400/10 bg-[#0a1224]/55 px-4 py-3 backdrop-blur-xl sm:px-6">
         <h1 className="text-sm font-bold tracking-wide text-cyan-300">WEAID · 온톨로지 대시보드</h1>
-        <span className="text-[11px] text-slate-400">창조자 이길환 (HAPPYTALKMAN)</span>
-        <span className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-cyan-400/15 bg-cyan-400/5 px-2.5 py-1 text-[11px] text-cyan-200">
+        <span className="hidden text-[11px] text-slate-400 sm:inline">창조자 HAPPYTALKMAN</span>
+        <span className="ml-1 inline-flex items-center gap-1.5 rounded-full border border-cyan-400/15 bg-cyan-400/5 px-2.5 py-1 text-[11px] text-cyan-200">
           <i className={`h-1.5 w-1.5 rounded-full ${status === "실시간 동기화 중" ? "bg-emerald-400" : "bg-amber-400"}`} />
           {status}
         </span>
         {stats && (
-          <span className="text-[11px] text-slate-400">
+          <span className="hidden text-[11px] text-slate-400 md:inline">
             턴 {stats.turns} · 주제 {stats.topics} · 엔티티 {stats.entities} · 관계 {stats.relations}
           </span>
         )}
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && search()}
+            placeholder="그래프 검색…"
+            className="w-32 rounded-[10px] border border-cyan-400/15 bg-[#0a1224]/70 px-3 py-1.5 text-[11px] text-cyan-100 outline-none placeholder:text-slate-600 sm:w-56"
+          />
+          <button
+            onClick={search}
+            className="rounded-[10px] border border-cyan-400/20 bg-cyan-400/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
+          >
+            검색
+          </button>
           <button
             onClick={() => post({ type: "mode", mode: "mindmap" })}
             className="rounded-[10px] border border-emerald-700/60 bg-emerald-900/25 px-3 py-1.5 text-[11px] font-semibold text-emerald-300 transition hover:bg-emerald-900/45"
