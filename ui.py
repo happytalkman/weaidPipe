@@ -8942,6 +8942,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def set_audio_status(self, status: str):
+        """오디오 상태 라벨 갱신 (ok/silent)."""
+        try:
+            lbl = getattr(self, "_rail_mode_lbl", None)
+            if lbl is None:
+                return
+            if status == "silent":
+                lbl.setText("LOCAL  /  🔇 무음 · 드라이버 복구 중")
+                lbl.setStyleSheet(f"color: {C.AMBER}; background: transparent; letter-spacing: 1px;")
+            else:
+                lbl.setText("LOCAL  /  LISTENING")
+                lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; letter-spacing: 1px;")
+        except Exception:
+            pass
+
     # ── 헌법 검사 패널 (Constitutional AI) ────────────────────────────────
     def _on_constitution_review(self, review: dict):
         self._constitution_review = review or {}
@@ -9926,6 +9941,13 @@ class JarvisUI:
             return bool(on)
         except Exception:
             return False
+
+    def set_audio_status(self, status: str):
+        """오디오 상태 표시: 'ok' | 'silent' → 하단 상태 라벨 갱신."""
+        try:
+            self._win.set_audio_status(status)
+        except Exception:
+            pass
 
     def toggle_hologram(self) -> bool:
         return self.set_hologram(None)

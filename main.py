@@ -87,6 +87,15 @@ _load_dotenv()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+
+# ── 프롬프트 다이어트: 라이브 세션에 노출할 핵심 도구만 유지 ──
+# (도구 선언 29개 → 15개로 축소 → 첫 응답 지연 대폭 감소)
+CORE_TOOL_NAMES = {
+    "open_app", "web_search", "file_controller", "computer_control",
+    "computer_settings", "media_control", "reminder", "screen_process",
+    "browser_control", "send_message", "email_control", "win_app_control",
+    "weather_report", "deep_research", "create_presentation",
+}
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 SUPPORTED_VOICE_NAMES = {
@@ -1270,6 +1279,7 @@ class JarvisLive:
         self._mic_audio: list = []                  # 화자 식별용 마이크 버퍼
         self._last_speaker_id: str | None = None
         self._last_tone = "neutral"                 # B4 톤 인식 결과
+        self._insight_busy = False                  # 인사이트 API 스로틀링
         self.voice_name     = voice_name
         # optional runtime limit in seconds (set by main)
         self.runtime_limit_seconds: int | None = None
@@ -2277,6 +2287,10 @@ class JarvisLive:
 
     def _insight_async(self, question: str, answer: str):
         """누적 대화 그래프 파이프라인: 즉시 병합(휴리스틱) → 딥 병합(LLM SKD)."""
+        # 스로틀링: 이전 딥 분석이 아직 실행 중이면 건너뛴다 (API 쿼터 경합 방지)
+        if self._insight_busy:
+            return
+        self._insight_busy = True
         try:
             from core import graph_store
 
@@ -2293,6 +2307,8 @@ class JarvisLive:
                 self.ui.write_log(f"SYS: 그래프 즉시 병합 실패: {str(e)[:100]}")
 
             # Phase 2 — 딥 분석: SKD 3계층 + 인과관계 + 헌법 검토 (Gemini→Grok 폴백)
+            # 스로틀링: 답변 직후 1.5초 대기 → 라이브 응답과 API 경합 완화
+            time.sleep(1.5)
             from core.constitution import record_rlaif
             from core.insight import build_insight
 
@@ -2382,6 +2398,8 @@ class JarvisLive:
             except Exception:
                 pass
             self.ui.write_log(f"SYS: 인사이트 처리 실패: {str(e)[:120]}")
+        finally:
+            self._insight_busy = False
 
     @staticmethod
     def _is_explicit_self_quit_transcript(text: str) -> bool:
@@ -2580,10 +2598,10 @@ class JarvisLive:
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
-        # B1: 장기 기억 컨텍스트 주입
+        # B1: 장기 기억 컨텍스트 주입 (다이어트: 상위 5개만)
         try:
             from core import long_memory, tone
-            lm_ctx = long_memory.memory_context(long_memory.load_memory())
+            lm_ctx = long_memory.memory_context(long_memory.load_memory(), limit=5)
             if lm_ctx:
                 parts.append(lm_ctx)
             if getattr(self, "_last_tone", "neutral") != "neutral":
@@ -2600,11 +2618,10 @@ class JarvisLive:
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{
-                "function_declarations": getattr(
-                    self,
-                    "tool_declarations",
-                    TOOL_DECLARATIONS,
-                )
+                "function_declarations": [
+                    t for t in getattr(self, "tool_declarations", TOOL_DECLARATIONS)
+                    if t.get("name") in CORE_TOOL_NAMES
+                ]
             }],
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
@@ -3130,6 +3147,7 @@ class JarvisLive:
                 print(f"[AID] ⚠️ 오디오 출력 장치 없음: {e}")
                 try:
                     self.ui.write_log("SYS: 오디오 출력 장치를 찾을 수 없어 음성 재생을 건너뜁니다. (대화는 계속됩니다)")
+                    self.ui.set_audio_status("silent")
                 except Exception:
                     pass
                 stream = None
@@ -3191,6 +3209,7 @@ class JarvisLive:
                                 pass
                             try:
                                 self.ui.write_log("SYS: 오디오 장치 손실 — 무음 모드로 전환, 자동 복구를 시도합니다.")
+                                self.ui.set_audio_status("silent")
                             except Exception:
                                 pass
                     elif self._audio_retry is not None and self._audio_retry.should_retry():
@@ -3207,6 +3226,7 @@ class JarvisLive:
                             self._audio_retry.on_success()
                             self._audio_retry = None
                             self.ui.write_log("SYS: 🔊 오디오 장치 복구 — 음성 재생을 재개합니다.")
+                            self.ui.set_audio_status("ok")
                             self.set_speaking(True)
                             await asyncio.to_thread(stream.write, chunk)
                         except Exception:
