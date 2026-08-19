@@ -104,3 +104,7 @@ memory/bots.json
 memory/voice_profiles.json
 memory/alarms.json
 memory/scheduled_tasks.json
+memory/long_term_prefs.json
+memory/routines.json
+memory/ab_evaluations.json
+memory/user_settings.json
