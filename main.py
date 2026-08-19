@@ -1351,6 +1351,16 @@ class JarvisLive:
             return True
         if self._handle_agent_command(self._current_input_transcript):
             return True
+        if self._handle_skill_command(self._current_input_transcript):
+            return True
+        if self._handle_market_command(self._current_input_transcript):
+            return True
+        if self._handle_translate_command(self._current_input_transcript):
+            return True
+        if self._handle_routine_command(self._current_input_transcript):
+            return True
+        if self._handle_language_command(self._current_input_transcript):
+            return True
         _wq = extract_why_query(self._current_input_transcript)
         if _wq is not None and self._handle_why_query(_wq):
             return True  # 인과 체인으로 직접 답변
@@ -1905,6 +1915,170 @@ class JarvisLive:
         except Exception as e:
             self.ui.write_log(f"SYS: 에이전트 루프 실패: {str(e)[:100]}")
 
+    def _handle_skill_command(self, text: str) -> bool:
+        """C1: '봇 OO 스킬 [스킬명] [인자]' → 봇의 스킬 실행."""
+        try:
+            from core import bots, bot_skills
+            m = re.search(r"봇\s+([^\s]+)\s+스킬", str(text or ""))
+            if not m:
+                return False
+            bot_key = m.group(1)
+            skill = bot_skills.extract_skill_command(text)
+            if not skill:
+                return False
+            name, args = skill
+            bot = bots.get_bot(bots.load_bots(), bot_key)
+            if bot is None:
+                self.ui.write_log(f"SYS: 봇을 찾지 못했습니다 — {bot_key}")
+                return True
+            if name not in [s["name"] for s in bot_skills.available_skills(bot)]:
+                self.ui.write_log(f"SYS: {bot['name']} 봇에 '{name}' 스킬이 없습니다. 보유 스킬: {[s['name'] for s in bot_skills.available_skills(bot)]}")
+                return True
+            result = bot_skills.execute_skill(name, args)
+            self.ui.write_log(f"⚙️ {bot['name']}·{name}: {result}")
+            return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 스킬 실행 실패: {str(e)[:100]}")
+            return False
+
+    def _handle_market_command(self, text: str) -> bool:
+        """주식/코인 브리핑 (공개 API)."""
+        try:
+            from core import market
+            cmd = market.extract_market_command(text)
+            if not cmd:
+                return False
+            threading.Thread(target=self._market_async, args=(cmd,), daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    def _market_async(self, cmd: dict):
+        try:
+            import urllib.request
+            import json as _json
+            from core import market
+            quotes = []
+            if cmd["kind"] == "crypto":
+                for cg_id in cmd["symbols"]:
+                    try:
+                        with urllib.request.urlopen(
+                            f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd",
+                            timeout=15,
+                        ) as resp:
+                            data = _json.loads(resp.read().decode("utf-8"))
+                        price = market.parse_coingecko(data, cg_id)
+                        quotes.append({"name": cg_id, "price": price})
+                    except Exception:
+                        quotes.append({"name": cg_id, "price": None})
+            elif cmd["kind"] == "stock":
+                for sym in cmd["symbols"]:
+                    try:
+                        with urllib.request.urlopen(
+                            f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                            timeout=15,
+                        ) as resp:
+                            data = _json.loads(resp.read().decode("utf-8"))
+                        price = market.parse_yahoo(data)
+                        quotes.append({"name": sym, "price": price})
+                    except Exception:
+                        quotes.append({"name": sym, "price": None})
+            briefing = market.format_briefing(quotes)
+            self.ui.write_log(briefing)
+            if not self._hard_stop.is_set():
+                self._speak_why_result(briefing[:400])
+        except Exception as e:
+            self.ui.write_log(f"SYS: 시세 조회 실패: {str(e)[:100]}")
+
+    def _handle_translate_command(self, text: str) -> bool:
+        """실시간 통역: 마지막 발화 → 대상 언어 번역."""
+        try:
+            from core import translate
+            target = translate.extract_translate_command(text)
+            if not target:
+                return False
+            threading.Thread(target=self._translate_async, args=(target,), daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    def _translate_async(self, target_lang: str):
+        try:
+            from core import graph_store, translate
+            store = graph_store.load()
+            user_turns = [t for t in store.get("turns", []) if t.get("speaker") == "user"]
+            if not user_turns:
+                self.ui.write_log("SYS: 통역할 발화가 없습니다. 먼저 말씀해 주세요.")
+                return
+            source = user_turns[-1].get("text", "")
+            self.ui.write_log(f"SYS: 🌐 {target_lang} 통역 중...")
+            out = translate.translate_chain(source, target_lang)
+            self.ui.write_log(f"🌐 [{target_lang}] {out['translated']}")
+            if not self._hard_stop.is_set():
+                self.speak(
+                    "[INTERNAL TRANSLATION] Read the following translation aloud verbatim. "
+                    + json.dumps(out["translated"], ensure_ascii=False)
+                )
+        except Exception as e:
+            self.ui.write_log(f"SYS: 통역 실패: {str(e)[:100]}")
+
+    def _handle_routine_command(self, text: str) -> bool:
+        """워크플로우 루틴 실행/목록/정의/삭제."""
+        try:
+            from core import routines
+            cmd, payload = routines.parse_routine_command(text)
+            if cmd == "list":
+                all_r = routines.load_routines()
+                self.ui.write_log(f"SYS: 📋 루틴 {len(all_r)}개: {', '.join(all_r.keys())}")
+                return True
+            if cmd == "define":
+                routines.define_routine(payload["name"], payload["steps"])
+                self.ui.write_log(f"SYS: 📋 루틴 등록 완료 — {payload['name']} ({len(payload['steps'])}단계)")
+                return True
+            if cmd == "remove":
+                ok = routines.remove_routine(payload["name"])
+                self.ui.write_log(f"SYS: 🗑️ 루틴 삭제 {'완료' if ok else '실패(없음)'} — {payload['name']}")
+                return True
+            if cmd == "run":
+                steps = routines.expand_routine(routines.load_routines(), payload["name"])
+                if not steps:
+                    self.ui.write_log(f"SYS: '{payload['name']}' 루틴을 찾지 못했습니다.")
+                    return True
+                threading.Thread(target=self._routine_async, args=(payload["name"], steps), daemon=True).start()
+                return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 루틴 처리 실패: {str(e)[:100]}")
+        return False
+
+    def _routine_async(self, name: str, steps: list):
+        import time as _time
+        try:
+            self.ui.write_log(f"SYS: 🔁 '{name}' 루틴 시작 ({len(steps)}단계)")
+            for i, step in enumerate(steps, 1):
+                if self._shutdown_requested.is_set():
+                    break
+                self.ui.write_log(f"SYS:   [{i}/{len(steps)}] {step}")
+                if self.session and self._loop and not self._hard_stop.is_set():
+                    self.speak(f"[ROUTINE STEP {i}/{len(steps)}] Perform this step now: " + json.dumps(step, ensure_ascii=False))
+                _time.sleep(2)
+            self.ui.write_log(f"SYS: ✅ '{name}' 루틴 완료.")
+        except Exception as e:
+            self.ui.write_log(f"SYS: 루틴 실행 실패: {str(e)[:100]}")
+
+    def _handle_language_command(self, text: str) -> bool:
+        """다국어: '영어로 바꿔줘' / '한국어로 바꿔줘'."""
+        try:
+            from core import i18n, settings
+            m = re.search(r"(영어|한국어)로\s*(?:바꿔|변경|설정)(?:줘|해줘)?", str(text or ""))
+            if not m:
+                return False
+            lang = i18n.normalize_lang(m.group(1))
+            settings.set_setting("language", lang)
+            self.ui.write_log("SYS: " + ("언어가 영어로 변경되었습니다." if lang == "en" else "언어가 한국어로 변경되었습니다."))
+            return True
+        except Exception:
+            return False
+
     def _handle_hologram_command(self, text: str) -> bool:
         """'홀로그램 켜줘/꺼줘' 로컬 명령 처리. 처리했으면 True."""
         t = str(text or "")
@@ -2137,6 +2311,14 @@ class JarvisLive:
                 self.ui.write_log(f"SYS: ⚖️ 헌법 검사 {score}/100 — 수정 답변을 반영했습니다.")
                 self.ui.write_log(f"AID(헌법 수정): {revised}")
                 record_rlaif(question, answer, revised, "revised", score, issues)
+                # A/B 평가 기록 (원본 vs 수정)
+                try:
+                    from core import ab_eval
+                    cmp = ab_eval.compare_responses(question, answer, revised)
+                    ab_eval.record_comparison(cmp)
+                    self.ui.write_log(f"SYS: 🔬 A/B 평가 — {cmp['winner']} 승리 (마진 {cmp['margin']})")
+                except Exception:
+                    pass
             else:
                 self.ui.write_log(f"SYS: ⚖️ 헌법 검사 {score}/100 — 원칙 준수.")
                 record_rlaif(question, answer, "", "original", score, issues)

@@ -101,6 +101,14 @@ def bot_system_prompt(bot: dict[str, Any]) -> str:
     skills = bot.get("skills") or []
     if skills:
         lines.append("보유 스킬: " + ", ".join(skills))
+    # C1: 등록된 스킬의 실제 설명 주입
+    try:
+        from core.bot_skills import skill_descriptions
+        desc = skill_descriptions(bot)
+        if desc:
+            lines.append(desc)
+    except Exception:
+        pass
     memory = bot.get("memory") or []
     if memory:
         lines.append("최근 기억:")

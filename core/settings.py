@@ -22,11 +22,12 @@ DEFAULTS: dict[str, Any] = {
     "hologram_on": False,
     "notifications_on": True,
     "tone_aware": True,
+    "language": "ko",
 }
 
 _BOOL_KEYS = {"hologram_on", "notifications_on", "tone_aware"}
 _INT_KEYS = {"proactive_interval", "alarm_interval", "summary_every_turns"}
-_STR_KEYS = {"voice_name", "live_model", "graphics_quality"}
+_STR_KEYS = {"voice_name", "live_model", "graphics_quality", "language"}
 
 
 def load_settings() -> dict[str, Any]:
