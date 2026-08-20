@@ -117,5 +117,27 @@ class TestSessionHelpers(unittest.TestCase):
         self.assertIn("새 질문", prompt)
 
 
+class TestEchoFilter(unittest.TestCase):
+    def test_exact_echo_detected(self):
+        self.assertTrue(gv.is_echo("안녕하세요 반갑습니다", ["안녕하세요 반갑습니다"]))
+
+    def test_similar_echo_detected(self):
+        # TTS가 마이크로 유입되어 살짝 달라진 경우
+        self.assertTrue(gv.is_echo("안녕하세요 반갑습니다", ["네 안녕하세요 반갑습니다"]))
+
+    def test_high_overlap_detected(self):
+        # 조사만 다른 경우 (TTS 유입의 전형적 변형)
+        self.assertTrue(
+            gv.is_echo("오늘 날씨가 맑습니다", ["오늘 날씨는 맑습니다"])
+        )
+
+    def test_different_speech_not_echo(self):
+        self.assertFalse(gv.is_echo("내일 일정 알려줘", ["오늘 날씨는 맑습니다"]))
+
+    def test_empty_not_echo(self):
+        self.assertFalse(gv.is_echo("", ["아무 말"]))
+        self.assertFalse(gv.is_echo("아무 말", []))
+
+
 if __name__ == "__main__":
     unittest.main()

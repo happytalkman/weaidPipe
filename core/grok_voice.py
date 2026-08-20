@@ -51,6 +51,45 @@ def pick_tts_backend() -> str:
         return "sapi"
 
 
+def normalize_text(text: str) -> str:
+    """비교용 정규화 (소문자·구두점 제거·조사 탈락·공백 정리)."""
+    import re
+    t = str(text or "").lower()
+    t = re.sub(r"[^\w가-힣 ]+", " ", t)
+    words = []
+    for w in t.split():
+        for p in ("은", "는", "이", "가", "을", "를", "에", "의", "과", "와", "도", "만"):
+            if w.endswith(p) and len(w) > len(p) + 1:
+                w = w[: -len(p)]
+                break
+        words.append(w)
+    return " ".join(words)
+
+
+def is_echo(text: str, recent_replies: list[str], threshold: float = 0.7) -> bool:
+    """STT 결과가 최근 답변(TTS 출력)의 에코인지 판정.
+
+    TTS 소리가 마이크로 유입되어 자기 답변을 다시 듣는 루프를 차단한다.
+    """
+    a = normalize_text(text)
+    if not a:
+        return False
+    for reply in recent_replies:
+        b = normalize_text(reply)
+        if not b:
+            continue
+        if a == b:
+            return True
+        if a in b or b in a:
+            return True
+        wa, wb = set(a.split()), set(b.split())
+        if wa and wb:
+            overlap = len(wa & wb) / max(len(wa), len(wb))
+            if overlap >= threshold:
+                return True
+    return False
+
+
 def record_until_silence(
     input_stream_factory: Callable[[], Any],
     sample_rate: int = 16000,
@@ -105,6 +144,10 @@ class GrokVoiceSession:
         self.sample_rate = sample_rate
         self._whisper_model = None
         self._history: list[str] = []
+        # 에코 루프 방지 상태
+        self._recent_replies: list[str] = []
+        self._last_tts_time = 0.0
+        self._tts_cooldown = 1.2  # TTS 직후 마이크 무시 시간(초)
 
     def _log(self, msg: str):
         if self.on_log:
@@ -205,11 +248,19 @@ class GrokVoiceSession:
             if time.time() - last_gemini_try >= GEMINI_RETRY_INTERVAL:
                 return "retry_gemini"
             try:
+                # TTS 직후에는 자기 목소리가 마이크로 들어가는 것을 방지 (에코 쿨다운)
+                if time.time() - self._last_tts_time < self._tts_cooldown:
+                    time.sleep(0.15)
+                    continue
                 if self.on_state:
                     self.on_state("LISTENING")
                 text = self.listen_once()
                 if not text:
                     time.sleep(0.1)
+                    continue
+                # 에코 필터: 최근 답변과 유사하면 무시 (혼자 대화 루프 차단)
+                if is_echo(text, self._recent_replies):
+                    self._log(f"SYS: 🎧 에코 감지 — 무시: {text[:60]}")
                     continue
                 self._log(f"You: {text}")
                 # S-P-O 화면 표시: 사용자 발화를 HUD 중앙에 조립
@@ -231,6 +282,10 @@ class GrokVoiceSession:
                     if self.on_state:
                         self.on_state("SPEAKING")
                     self._tts(reply)
+                    # 에코 방지 상태 갱신
+                    self._recent_replies.append(reply)
+                    self._recent_replies = self._recent_replies[-3:]
+                    self._last_tts_time = time.time()
             except Exception as e:
                 self._log(f"SYS: Grok 음성 오류: {str(e)[:100]}")
                 time.sleep(2)
