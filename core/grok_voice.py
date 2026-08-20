@@ -96,14 +96,19 @@ def record_until_silence(
     silence_seconds: float = 1.2,
     max_seconds: float = 12.0,
     threshold: float = 0.02,
-) -> list[float]:
-    """무음이 silence_seconds 지속될 때까지 녹음 (테스트 가능, 스트림 주입)."""
+) -> tuple[list[float], float]:
+    """무음이 silence_seconds 지속될 때까지 녹음.
+
+    반환: (샘플, 음성 블록 비율 0~1) — 음성 비율이 낮으면 소음으로 판정.
+    """
     import numpy as np
 
     stream = input_stream_factory()
     blocks: list[list[float]] = []
     silent = 0.0
     total = 0.0
+    voiced_blocks = 0
+    total_blocks = 0
     try:
         while total < max_seconds:
             chunk = stream.read_block()
@@ -111,15 +116,18 @@ def record_until_silence(
             blocks.append(samples)
             dur = len(samples) / sample_rate
             total += dur
+            total_blocks += 1
             if detect_silence(samples, threshold):
                 silent += dur
             else:
                 silent = 0.0
+                voiced_blocks += 1
             if silent >= silence_seconds and blocks:
                 break
     except Exception:
         pass
-    return [s for block in blocks for s in block]
+    voiced_ratio = voiced_blocks / max(1, total_blocks)
+    return [s for block in blocks for s in block], voiced_ratio
 
 
 class GrokVoiceSession:
@@ -157,7 +165,7 @@ class GrokVoiceSession:
                 pass
 
     def _stt(self, samples: list[float]) -> str:
-        """faster-whisper STT (lazy 로드)."""
+        """faster-whisper STT (lazy 로드) — 무발화 확률 게이트 포함."""
         import numpy as np
         from faster_whisper import WhisperModel
 
@@ -165,8 +173,17 @@ class GrokVoiceSession:
             self._log("SYS: 🎙️ 음성 인식 모델 로드 중... (최초 1회)")
             self._whisper_model = WhisperModel("medium", device="cpu", compute_type="int8")
         audio = np.asarray(samples, dtype=np.float32)
-        segments, _info = self._whisper_model.transcribe(audio, language="ko", beam_size=1)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        segments, _info = self._whisper_model.transcribe(
+            audio, language="ko", beam_size=1, vad_filter=True
+        )
+        segs = list(segments)
+        if not segs:
+            return ""
+        # 무발화 확률: 평균이 높으면 실제 발화가 아님 → 폐기
+        avg_no_speech = sum(float(seg.no_speech_prob) for seg in segs) / len(segs)
+        if avg_no_speech > 0.55:
+            return ""
+        text = " ".join(seg.text.strip() for seg in segs).strip()
         return text
 
     def _respond(self, text: str) -> str:
@@ -222,18 +239,26 @@ class GrokVoiceSession:
         await communicate.save(str(mp3_path))
 
     def listen_once(self) -> str | None:
-        """한 번 듣고 텍스트 반환 (발화 없으면 None)."""
+        """한 번 듣고 텍스트 반환 (실제 발화가 아니면 None).
+
+        판정 기준:
+          1. 최소 0.5초 이상 녹음
+          2. 음성 블록 비율 25% 이상 (소음 녹음 폐기)
+          3. whisper 무발화 확률 게이트 (환각 텍스트 폐기)
+        """
         import numpy as np
         import sounddevice as sd
 
         try:
-            samples = record_until_silence(
+            samples, voiced_ratio = record_until_silence(
                 lambda: _SDBlockReader(sd, self.sample_rate),
                 sample_rate=self.sample_rate,
             )
         except Exception:
             return None
         if len(samples) < self.sample_rate * 0.5:  # 최소 0.5초
+            return None
+        if voiced_ratio < 0.25:  # 대부분 소음이면 폐기
             return None
         text = self._stt(samples)
         return text or None

@@ -51,21 +51,32 @@ class TestRecordUntilSilence(unittest.TestCase):
                 return (np.sin(np.linspace(0, 10, 1024)) * 0.3).astype("float32")
             return [0.0] * 1024
 
+    class _NoiseStream:
+        def read_block(self):
+            import numpy as np
+            return (np.random.default_rng(42).normal(0, 0.008, 1024)).astype("float32")
+
     def test_stops_after_silence(self):
         stream = self._FakeStream()
-        samples = gv.record_until_silence(lambda: stream, sample_rate=16000, silence_seconds=0.06, max_seconds=5.0)
+        samples, ratio = gv.record_until_silence(lambda: stream, sample_rate=16000, silence_seconds=0.06, max_seconds=5.0)
         self.assertGreater(len(samples), 0)
-        self.assertLess(stream.calls, 20)  # 무음 감지로 조기 종료
+        self.assertGreater(ratio, 0.3)  # 음성 비율 확인
+        self.assertLess(stream.calls, 20)
+
+    def test_noise_returns_low_ratio(self):
+        stream = self._NoiseStream()
+        samples, ratio = gv.record_until_silence(lambda: stream, sample_rate=16000, silence_seconds=0.1, max_seconds=0.3)
+        self.assertLess(ratio, 0.25)  # 소음 → 음성 비율 낮음 → 폐기 대상
 
     def test_max_duration_caps(self):
         class _LoudStream:
             def read_block(self):
                 import numpy as np
                 return (np.sin(np.linspace(0, 10, 1024)) * 0.3).astype("float32")
-        samples = gv.record_until_silence(lambda: _LoudStream(), sample_rate=16000, silence_seconds=0.5, max_seconds=0.2)
-        # 0.2초 = 약 3블록(1024/16000=0.064s)
+        samples, ratio = gv.record_until_silence(lambda: _LoudStream(), sample_rate=16000, silence_seconds=0.5, max_seconds=0.2)
         self.assertGreater(len(samples), 0)
         self.assertLess(len(samples), 16000 * 0.5)
+        self.assertGreater(ratio, 0.5)
 
 
 class TestTTSBackend(unittest.TestCase):
