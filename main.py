@@ -1512,6 +1512,21 @@ class JarvisLive:
             pass
         self.ui.write_log("SYS: ▶️ 재개 명령 수신 — 다시 듣고 있습니다.")
 
+    def _run_grok_fallback(self) -> str:
+        """Grok 음성 모드 블로킹 실행. 'retry_gemini' | 'stopped' 반환."""
+        try:
+            from core.grok_voice import GrokVoiceSession
+            session = GrokVoiceSession(
+                system_prompt=_load_system_prompt(self._get_current_voice()),
+                on_log=self.ui.write_log,
+                on_state=lambda s: self.ui.set_state(s),
+                stop_event=self._shutdown_requested,
+            )
+            return session.run_forever()
+        except Exception as e:
+            self.ui.write_log(f"SYS: Grok 음성 모드 실패: {str(e)[:120]}")
+            return "retry_gemini"
+
     def _on_clap_wake(self):
         """박수 2번 웨이크업: STOP 해제 + 청취 상태 전환."""
         was_stopped = self._hard_stop.is_set()
@@ -3482,6 +3497,19 @@ class JarvisLive:
                         live_model_id = LIVE_MODEL
                         print(f"[AID] 🔄 Model 1008 error — falling back to {LIVE_MODEL}")
                         self.ui.write_log(f"SYS: 모델 오류 — 기본 모델 {LIVE_MODEL}로 복귀합니다.")
+                    # Gemini 장애 → Grok 음성 폴백 (지출 한도 등 치명 오류는 즉시 전환)
+                    self._gemini_failures = getattr(self, "_gemini_failures", 0) + 1
+                    try:
+                        from core.grok_voice import should_switch_to_grok
+                        if should_switch_to_grok(str(actual), self._gemini_failures):
+                            self.ui.write_log("SYS: 🟠 Gemini 음성 장애 감지 — Grok 음성 모드로 전환합니다 (Gemini 복구 시 자동 복귀).")
+                            result = await asyncio.to_thread(self._run_grok_fallback)
+                            self._gemini_failures = 0
+                            if result == "stopped":
+                                return
+                            continue  # retry_gemini → 메인 루프에서 Gemini 재연결
+                    except Exception:
+                        pass
                     try:
                         self.ui.write_log(f"SYS: 연결 재시도 중... ({str(actual)[:80]})")
                     except Exception:
@@ -3491,6 +3519,7 @@ class JarvisLive:
                 retry_delay = min(retry_delay * 2, 30.0)
             else:
                 retry_delay = 2.0
+                self._gemini_failures = 0
 
 def main():
     import sys
