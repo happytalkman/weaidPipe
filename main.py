@@ -1325,6 +1325,37 @@ class JarvisLive:
             extract_graph_query, extract_why_query,
         )
 
+        # B1: 의도 게이트 — 명령 가능성이 없으면 로컬 체인을 건너뛰고 모델로 직행
+        try:
+            from core import intent
+            if not intent.is_likely_command(self._current_input_transcript):
+                if self._hard_stop.is_set():
+                    self.ui.write_log("SYS: ⏹️ STOP 상태입니다. '말해'로 재개한 뒤 다시 시도해 주세요.")
+                    return False
+                self._last_input_transcript = self._current_input_transcript
+                self._last_input_transcript_at = time.monotonic()
+                await self.session.send_client_content(
+                    turns={"parts": [{"text": self._current_input_transcript}]},
+                    turn_complete=True,
+                )
+                return True
+        except Exception:
+            pass
+
+        # B3: 이전 대화 검색
+        try:
+            from core import chat_search
+            _sq = chat_search.extract_search_command(self._current_input_transcript)
+            if _sq:
+                from core import graph_store
+                results = chat_search.search_turns(graph_store.load(), _sq)
+                self.ui.write_log(chat_search.format_results(results))
+                if results and not self._hard_stop.is_set():
+                    self._speak_why_result(chat_search.format_results(results)[:500])
+                return True
+        except Exception:
+            pass
+
         # 헌법 STOP: 명령어는 API로 전달하지 않고 로컬에서 즉시 처리한다.
         if is_stop_utterance(self._current_input_transcript):
             self._handle_stop_command()
@@ -1362,6 +1393,8 @@ class JarvisLive:
         if self._handle_agent_command(self._current_input_transcript):
             return True
         if self._handle_skill_command(self._current_input_transcript):
+            return True
+        if self._handle_skill_define_command(self._current_input_transcript):
             return True
         if self._handle_market_command(self._current_input_transcript):
             return True
@@ -2089,6 +2122,36 @@ class JarvisLive:
         except Exception:
             return False
 
+    def _handle_skill_define_command(self, text: str) -> bool:
+        """D1: '스킬 만들어줘 이름:OO 설명:OO 답변:OO' / '스킬 목록' / '스킬 삭제'."""
+        try:
+            from core import skill_plugins, bot_skills
+            t = str(text or "")
+            if "스킬 목록" in t:
+                builtin = ", ".join(bot_skills.SKILLS.keys())
+                custom = ", ".join(s["name"] for s in skill_plugins.load_custom_skills())
+                self.ui.write_log(f"SYS: ⚙️ 내장 스킬: {builtin}")
+                if custom:
+                    self.ui.write_log(f"SYS: ⚙️ 커스텀 스킬: {custom}")
+                return True
+            m = re.search(r"스킬\s*(?:삭제|지워)\s*(?:해줘|줘)?\s*([^\s]+)", t)
+            if m:
+                ok = skill_plugins.remove_custom_skill(m.group(1))
+                self.ui.write_log(f"SYS: 🗑️ 스킬 삭제 {'완료' if ok else '실패(없음)'} — {m.group(1)}")
+                return True
+            parsed = skill_plugins.parse_skill_define_command(t)
+            if parsed:
+                if not parsed["template"]:
+                    self.ui.write_log("SYS: '답변:' 내용이 필요합니다 (예: 답변:안녕 {args}님!)")
+                    return True
+                skill_plugins.add_custom_skill(parsed["name"], parsed["description"], parsed["template"])
+                skill_plugins.register_all()
+                self.ui.write_log(f"SYS: ⚙️ 커스텀 스킬 등록 완료 — {parsed['name']}")
+                return True
+        except Exception as e:
+            self.ui.write_log(f"SYS: 스킬 처리 실패: {str(e)[:100]}")
+        return False
+
     def _handle_hologram_command(self, text: str) -> bool:
         """'홀로그램 켜줘/꺼줘' 로컬 명령 처리. 처리했으면 True."""
         t = str(text or "")
@@ -2362,6 +2425,15 @@ class JarvisLive:
                 for cand in long_memory.extract_memory_candidates(question, answer):
                     long_memory.add_memory(entries, cand)
                 long_memory.save_memory(entries)
+            except Exception:
+                pass
+            # C1: 지식 충돌 감지
+            try:
+                from core import conflict
+                conflicts = conflict.detect_conflicts(store.get("triples", []))
+                report = conflict.conflict_report(conflicts)
+                if report:
+                    self.ui.write_log("SYS: " + report.replace(chr(10), chr(10) + "SYS: "))
             except Exception:
                 pass
             # HUD 중앙에 구조화된 S-P-O 조립 애니메이션 표시
@@ -3422,6 +3494,21 @@ class JarvisLive:
 
 def main():
     import sys
+
+    # A1: 단일 인스턴스 보장 (중복 실행으로 인한 마이크 충돌 차단)
+    try:
+        from core import single_instance
+        if not single_instance.acquire():
+            print("[AID] WEAID가 이미 실행 중입니다. 기존 창을 사용하세요.")
+            return 0
+    except Exception:
+        pass
+    # A2: 크래시 부검 활성화
+    try:
+        from core import crashlog
+        crashlog.enable()
+    except Exception:
+        pass
 
     if "--self-test" in sys.argv[1:]:
         from scripts.self_test import main as self_test_main

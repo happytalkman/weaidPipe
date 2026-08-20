@@ -7245,6 +7245,27 @@ class MainWindow(QMainWindow):
         sc_show_right = QShortcut(QKeySequence("R"), self)
         sc_show_right.activated.connect(self._show_right_panel_popup)
     def closeEvent(self, event):
+        # A1: 설정 기반 닫기 동작 — 트레이 숨김 vs 종료 명확화
+        try:
+            from core import notify, settings as _st, single_instance as _si
+            behavior = _si.close_behavior(_st.load_settings(),
+                                          bool(getattr(self, "_tray", None) and self._tray.isVisible()))
+            if behavior == "tray" and not getattr(self, "_force_quit", False):
+                event.ignore()
+                if self._vision_preview is not None:
+                    self._vision_preview.stop()
+                self.hide()
+                self._tray.showMessage(
+                    "AID", "트레이에서 계속 실행 중입니다. 완전히 종료하려면 트레이 아이콘에서 QUIT를 선택하세요.",
+                    QSystemTrayIcon.MessageIcon.Information, 3000
+                )
+                try:
+                    notify.notify("AID", "트레이에서 계속 실행 중입니다.")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         # Minimize to tray instead of quitting (if tray is available)
         try:
             if hasattr(self, "_tray") and self._tray.isVisible() and not getattr(self, "_force_quit", False):
