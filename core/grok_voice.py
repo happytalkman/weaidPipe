@@ -91,15 +91,20 @@ class GrokVoiceSession:
         system_prompt: str,
         on_log: Callable[[str], None] | None = None,
         on_state: Callable[[str], None] | None = None,
+        on_spo: Callable[[str], None] | None = None,
+        on_reply: Callable[[str, str], None] | None = None,
         stop_event: threading.Event | None = None,
         sample_rate: int = 16000,
     ):
         self.system_prompt = system_prompt
         self.on_log = on_log
         self.on_state = on_state
+        self.on_spo = on_spo
+        self.on_reply = on_reply
         self.stop_event = stop_event or threading.Event()
         self.sample_rate = sample_rate
         self._whisper_model = None
+        self._history: list[str] = []
 
     def _log(self, msg: str):
         if self.on_log:
@@ -123,7 +128,10 @@ class GrokVoiceSession:
 
     def _respond(self, text: str) -> str:
         from core.llm import generate
-        return generate(self.system_prompt, text, provider="grok", model="grok-4", timeout_s=60).strip()
+        # 최근 대화 맥락 유지 (최대 6턴)
+        context = "\n".join(self._history[-6:])
+        prompt = f"이전 대화:\n{context}\n\n사용자: {text}\n답변하세요 (간결하고 자연스럽게)." if context else text
+        return generate(self.system_prompt, prompt, provider="grok", model="grok-4", timeout_s=60).strip()
 
     def _tts(self, text: str) -> None:
         """edge-tts → mp3 → soundfile 디코드 → sounddevice 재생. 실패 시 SAPI."""
@@ -204,11 +212,22 @@ class GrokVoiceSession:
                     time.sleep(0.1)
                     continue
                 self._log(f"You: {text}")
+                # S-P-O 화면 표시: 사용자 발화를 HUD 중앙에 조립
+                if self.on_spo:
+                    self.on_spo(text)
                 if self.on_state:
                     self.on_state("THINKING")
                 reply = self._respond(text)
                 if reply:
+                    self._history.append(f"사용자: {text}")
+                    self._history.append(f"AID: {reply}")
+                    self._history = self._history[-12:]
                     self._log(f"{self._assistant_name()}: {reply}")
+                    # S-P-O 화면 표시: 답변 조립 + 인사이트 파이프라인(온톨로지·S-P-O 추출)
+                    if self.on_spo:
+                        self.on_spo(reply)
+                    if self.on_reply:
+                        self.on_reply(text, reply)
                     if self.on_state:
                         self.on_state("SPEAKING")
                     self._tts(reply)

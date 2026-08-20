@@ -85,6 +85,37 @@ class TestSessionHelpers(unittest.TestCase):
         s._log("테스트")
         self.assertEqual(logs, ["테스트"])
 
+    def test_spo_and_reply_callbacks(self):
+        """S-P-O 표시(on_spo)와 인사이트(on_reply) 콜백이 발화/응답 시 호출된다."""
+        spo_calls = []
+        reply_calls = []
+        s = gv.GrokVoiceSession(
+            system_prompt="x",
+            on_spo=spo_calls.append,
+            on_reply=lambda q, a: reply_calls.append((q, a)),
+        )
+        # 내부 훅을 직접 호출해 콜백 배선 검증 (네트워크 없이)
+        text = "안녕하세요"
+        s.on_spo(text)
+        reply = "안녕하세요, 반갑습니다"
+        s.on_spo(reply)
+        s.on_reply(text, reply)
+        self.assertEqual(spo_calls, [text, reply])
+        self.assertEqual(reply_calls, [(text, reply)])
+
+    def test_respond_keeps_history(self):
+        s = gv.GrokVoiceSession(system_prompt="x")
+        s._history = ["사용자: 이전 질문", "AID: 이전 답변"]
+        import core.grok_voice as gv2
+        from unittest import mock
+        with mock.patch("core.llm.generate", return_value="새 답변") as gen:
+            out = s._respond("새 질문")
+        self.assertEqual(out, "새 답변")
+        # 프롬프트에 이전 대화가 포함되었는지 확인
+        prompt = gen.call_args[0][1]
+        self.assertIn("이전 질문", prompt)
+        self.assertIn("새 질문", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

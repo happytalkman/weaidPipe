@@ -1517,15 +1517,52 @@ class JarvisLive:
         try:
             from core.grok_voice import GrokVoiceSession
             session = GrokVoiceSession(
-                system_prompt=_load_system_prompt(self._get_current_voice()),
+                system_prompt=self._grok_voice_prompt(),
                 on_log=self.ui.write_log,
                 on_state=lambda s: self.ui.set_state(s),
+                on_spo=self.ui.show_hud_spo,
+                on_reply=self._on_grok_exchange,
                 stop_event=self._shutdown_requested,
             )
             return session.run_forever()
         except Exception as e:
             self.ui.write_log(f"SYS: Grok 음성 모드 실패: {str(e)[:120]}")
             return "retry_gemini"
+
+    def _grok_voice_prompt(self) -> str:
+        """Grok 음성 모드 전용 시스템 프롬프트 (도구 라우팅 없는 대화형)."""
+        latin, korean = _assistant_identity(self._get_current_voice())
+        gender = "male" if latin == ASSISTANT_NAME_MALE else "female"
+        parts = [
+            f"You are {latin} ({korean}), a {gender}-voiced AI assistant created by "
+            f"WEAID (위에이드), the project of creator 이길환 (HAPPYTALKMAN) 님. "
+            f"Always speak of the creator with respect.",
+        ]
+        try:
+            from core.constitution import constitution_summary
+            parts.append(constitution_summary())
+        except Exception:
+            pass
+        try:
+            from core import long_memory
+            ctx = long_memory.memory_context(long_memory.load_memory(), limit=5)
+            if ctx:
+                parts.append(ctx)
+        except Exception:
+            pass
+        parts.append(
+            "음성 대화 전용입니다. 짧고 자연스러운 한국어 구어체로 답하고, "
+            "도구 호출이나 마크다운은 사용하지 마세요."
+        )
+        return "\n\n".join(parts)
+
+    def _on_grok_exchange(self, question: str, answer: str):
+        """Grok 모드 Q&A → 기존 인사이트 파이프라인 재사용 (온톨로지·S-P-O·헌법)."""
+        try:
+            self.ui.set_last_exchange(question, answer)
+            threading.Thread(target=self._insight_async, args=(question, answer), daemon=True).start()
+        except Exception:
+            pass
 
     def _on_clap_wake(self):
         """박수 2번 웨이크업: STOP 해제 + 청취 상태 전환."""
