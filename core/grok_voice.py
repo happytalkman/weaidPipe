@@ -120,7 +120,7 @@ class GrokVoiceSession:
 
         if self._whisper_model is None:
             self._log("SYS: 🎙️ 음성 인식 모델 로드 중... (최초 1회)")
-            self._whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+            self._whisper_model = WhisperModel("medium", device="cpu", compute_type="int8")
         audio = np.asarray(samples, dtype=np.float32)
         segments, _info = self._whisper_model.transcribe(audio, language="ko", beam_size=1)
         text = " ".join(seg.text.strip() for seg in segments).strip()
