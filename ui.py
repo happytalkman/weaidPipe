@@ -4417,10 +4417,118 @@ class ToolLogWidget(QWidget):
 # MissionControlPanel — tabbed right panel
 # ---------------------------------------------------------------------------
 
+class EmbeddedMindmapWidget(QWidget):
+    """
+    Embedded Mindmap & Knowledge Graph tab page using QWebEngineView.
+    Renders directly inside the main application window tab stack without launching
+    any external popups or separate processes.
+    """
+
+    def __init__(self, mode: str = "mindmap", parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.data = {}
+        self._page_loaded = False
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header bar
+        bar = QWidget()
+        bar.setFixedHeight(30)
+        bar.setStyleSheet(f"background: {C.DARK}; border-bottom: 1px solid {C.BORDER};")
+        bar_lay = QHBoxLayout(bar)
+        bar_lay.setContentsMargins(8, 0, 8, 0)
+
+        title_str = "MINDMAP (마인드맵)" if self.mode == "mindmap" else "GRAPH (온톨로지 지식그래프)"
+        lbl = QLabel(title_str)
+        lbl.setStyleSheet(f"color: {C.PRI}; font-weight: bold; font-size: 11px; border: none;")
+        bar_lay.addWidget(lbl)
+        bar_lay.addStretch(1)
+
+        btn_rdf = QPushButton("RDF/OWL2")
+        btn_rdf.setFixedHeight(22)
+        btn_rdf.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_rdf.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PANEL}; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px;
+                padding: 0 6px; font-size: 10px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; color: {C.PRI}; }}
+        """)
+        btn_rdf.setToolTip("지식 그래프를 RDF/OWL2 (Turtle) 형식으로 내보내기")
+
+        def _export_rdf():
+            try:
+                from core.rdf_export import export_ontology
+                path = export_ontology()
+                btn_rdf.setText("RDF ✅")
+                btn_rdf.setToolTip(f"내보내기 완료: {path}")
+            except Exception as e:
+                btn_rdf.setToolTip(f"내보내기 실패: {str(e)[:120]}")
+
+        btn_rdf.clicked.connect(_export_rdf)
+        bar_lay.addWidget(btn_rdf)
+
+        layout.addWidget(bar)
+
+        self._web_view = None
+        self._fallback_view = None
+
+        try:
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtCore import QUrl
+            self._web_view = QWebEngineView(self)
+            layout.addWidget(self._web_view, 1)
+
+            html_path = BASE_DIR / "web" / "mindmap.html"
+            if html_path.exists():
+                self._web_view.loadFinished.connect(self._on_load_finished)
+                self._web_view.load(QUrl.fromLocalFile(str(html_path)))
+            else:
+                self._web_view.setHtml("<body style='background:#05070d;color:#dbe4ff'><h3>web/mindmap.html not found</h3></body>")
+        except Exception:
+            from PyQt6.QtWidgets import QTextBrowser
+            self._fallback_view = QTextBrowser(self)
+            self._fallback_view.setStyleSheet("background:#05070d; color:#dbe4ff; border:none; padding:12px;")
+            self._fallback_view.setText("마인드맵 데이터가 아직 없습니다. 대화를 시작하면 여기에 표시됩니다.")
+            layout.addWidget(self._fallback_view, 1)
+
+    def _on_load_finished(self, ok: bool):
+        self._page_loaded = ok
+        if ok and self.data:
+            self._render()
+
+    def set_data(self, data: dict):
+        self.data = data or {}
+        self._render()
+
+    def _render(self):
+        if self._web_view and self._page_loaded:
+            data_js = json.dumps(self.data, ensure_ascii=False)
+            if self.mode == "graph":
+                self._web_view.page().runJavaScript(f"if (typeof renderGraph === 'function') renderGraph({data_js}, {{}});")
+            else:
+                self._web_view.page().runJavaScript(f"if (typeof renderMindmap === 'function') renderMindmap({data_js});")
+        elif self._fallback_view and self.data:
+            topic = self.data.get("topic", "대화 주제")
+            triples = self.data.get("triples", [])
+            lines = [f"<h3>[{topic}]</h3>", "<ul>"]
+            for t in triples:
+                s, p, o = t.get("subject", ""), t.get("predicate", ""), t.get("object", "")
+                lines.append(f"<li><b>{s}</b> — <i>{p}</i> → <b>{o}</b></li>")
+            lines.append("</ul>")
+            self._fallback_view.setHtml("".join(lines))
+
+
 class MissionControlPanel(QWidget):
     """
     Tabbed mission-control right panel with:
-      COMMS | TASKS | ASSETS | TOOLS
+      COMMS | MINDMAP | GRAPH | TASKS | ASSETS | TOOLS
     """
 
     def __init__(self, parent=None):
@@ -4446,7 +4554,7 @@ class MissionControlPanel(QWidget):
         tb_lay.setSpacing(2)
 
         self._tabs: list[QPushButton] = []
-        self._tab_names = ["COMMS", "TASKS", "ASSETS", "TOOLS"]
+        self._tab_names = ["COMMS", "MINDMAP", "GRAPH", "TASKS", "ASSETS", "TOOLS"]
         self._active_tab = 0
 
         for i, name in enumerate(self._tab_names):
@@ -4470,20 +4578,35 @@ class MissionControlPanel(QWidget):
         self.log_widget = LogWidget()
         self._stack.addWidget(self.log_widget)
 
-        # Page 1: TASKS — task queue
+        # Page 1: MINDMAP — embedded mindmap visualization
+        self.mindmap_widget = EmbeddedMindmapWidget(mode="mindmap")
+        self._stack.addWidget(self.mindmap_widget)
+
+        # Page 2: GRAPH — embedded ontology knowledge graph
+        self.graph_widget = EmbeddedMindmapWidget(mode="graph")
+        self._stack.addWidget(self.graph_widget)
+
+        # Page 3: TASKS — task queue
         self.task_widget = TaskQueueWidget()
         self._stack.addWidget(self.task_widget)
 
-        # Page 2: ASSETS — file drop zone (built externally, placeholder here)
+        # Page 4: ASSETS — file drop zone (built externally, placeholder here)
         self._assets_page = QWidget()
         self._assets_page.setStyleSheet("background: transparent;")
         self._stack.addWidget(self._assets_page)
 
-        # Page 3: TOOLS — tool execution log
+        # Page 5: TOOLS — tool execution log
         self.tool_widget = ToolLogWidget()
         self._stack.addWidget(self.tool_widget)
 
         self._switch_tab(0)
+
+    def set_mindmap_data(self, data: dict):
+        if hasattr(self, "mindmap_widget") and self.mindmap_widget:
+            self.mindmap_widget.set_data(data)
+        if hasattr(self, "graph_widget") and self.graph_widget:
+            self.graph_widget.set_data(data)
+
 
     def set_command_center_open(self, is_open: bool):
         """Keep chat visible in focus mode; reveal all mission tools on demand."""
@@ -8787,122 +8910,44 @@ class MainWindow(QMainWindow):
         self._mindmap_pending = None
 
     def set_mindmap_data(self, data: dict):
-        """Thread-safe: store built insight data; auto-open the viewer if requested."""
+        """Thread-safe: store built insight data and update embedded MINDMAP & GRAPH tabs."""
         self._mindmap_data = data or {}
+        if hasattr(self, "_mission") and self._mission:
+            self._mission.set_mindmap_data(self._mindmap_data)
         pending = getattr(self, "_mindmap_pending", None)
         self._mindmap_pending = None
         if pending:
-            self._log_sig.emit("SYS: 분석 완료 — 뷰어를 자동으로 엽니다.")
+            self._log_sig.emit("SYS: 분석 완료 — 탭을 전환합니다.")
             self._launch_mindmap_viewer(pending)
 
     def _launch_mindmap_viewer(self, mode: str = "mindmap"):
-        """Open the mindmap / ontology popup in a separate process.
-
-        QtWebEngine hard-crashes the main app on this machine, so the D3.js
-        viewer runs fully isolated. If the viewer ever dies, we fall back to
-        the system browser.
-        """
-        if not getattr(self, "_mindmap_data", None):
-            self._log_sig.emit("SYS: 지식 구조를 분석 중입니다. 잠시 후 다시 눌러주세요.")
-            return
-        try:
-            import subprocess as _sp
-            import tempfile as _tf
-
-            data_file = Path(_tf.gettempdir()) / "weaid_mindmap_data.json"
-            data_file.write_text(
-                json.dumps(self._mindmap_data, ensure_ascii=False), encoding="utf-8"
-            )
-            viewer = BASE_DIR / "scripts" / "mindmap_viewer.py"
-            if not viewer.exists():
-                self._open_mindmap_in_browser(data_file)
-                return
-
-            old = getattr(self, "_mindmap_proc", None)
-            if old is not None and old.poll() is None:
-                try:
-                    old.kill()
-                except Exception:
-                    pass
-
-            flags = (
-                _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
-                if os.name == "nt"
-                else 0
-            )
-            log_path = Path(_tf.gettempdir()) / "weaid_mindmap_viewer.log"
-            log_fh = open(log_path, "w", encoding="utf-8")
-            proc = _sp.Popen(
-                [sys.executable, str(viewer), str(data_file), mode],
-                cwd=str(BASE_DIR),
-                stdout=log_fh,
-                stderr=log_fh,
-                creationflags=flags,
-            )
-            self._mindmap_proc = proc
-            self._log_sig.emit("SYS: 마인드맵/온톨로지 뷰어 창을 열었습니다.")
-
-            def _watchdog():
-                time.sleep(4)
-                if proc.poll() is not None:
-                    self._log_sig.emit("SYS: 뷰어가 종료되어 기본 브라우저로 대체합니다...")
-                    self._open_mindmap_in_browser(data_file)
-
-            threading.Thread(target=_watchdog, daemon=True).start()
-        except Exception as e:
-            self._log_sig.emit(f"SYS: Mindmap viewer failed: {e}")
+        """Switch directly to embedded MINDMAP or GRAPH tab in main window."""
+        tab_idx = 1 if mode == "mindmap" else 2
+        if hasattr(self, "_mission") and self._mission:
+            self._mission._switch_tab(tab_idx)
+            self._log_sig.emit(f"SYS: {'마인드맵' if mode == 'mindmap' else '온톨로지'} 탭으로 전환되었습니다.")
 
     def _open_mindmap_in_browser(self, data_file):
-        """Fallback: write a self-contained HTML file and open it in the browser."""
-        try:
-            import tempfile as _tf
-            import webbrowser as _wb
-
-            html_path = BASE_DIR / "web" / "mindmap.html"
-            html = html_path.read_text(encoding="utf-8") if html_path.exists() else "<body></body>"
-            data_js = json.dumps(getattr(self, "_mindmap_data", {}) or {}, ensure_ascii=False)
-            html = html.replace(
-                "window.MINDMAP_DATA = null;",
-                f"window.MINDMAP_DATA = {data_js};",
-            )
-            out = Path(_tf.gettempdir()) / "weaid_mindmap.html"
-            out.write_text(html, encoding="utf-8")
-            _wb.open(out.as_uri())
-            self._log_sig.emit("SYS: 기본 브라우저로 마인드맵을 열었습니다.")
-        except Exception as e:
-            self._log_sig.emit(f"SYS: Browser fallback failed: {e}")
+        """Fallback: switch directly to embedded MINDMAP tab."""
+        self._launch_mindmap_viewer("mindmap")
 
     def _toggle_mindmap(self):
         if not self._last_answer:
             self._log.append_log("SYS: 질문을 하면 답변과 함께 마인드맵이 자동 생성됩니다.")
-            return
         self._mindmap_mode = "mindmap"
-        if not getattr(self, "_mindmap_data", None):
-            # 싱크 보장: 분석 중이면 대기했다가 완료 시 자동으로 연다.
-            self._mindmap_pending = "mindmap"
-            self._log.append_log("SYS: 분석 중... 완료되면 마인드맵이 자동으로 열립니다.")
-            return
         self._launch_mindmap_viewer("mindmap")
 
     def _toggle_graph(self):
         if not self._last_answer:
             self._log.append_log("SYS: 먼저 질문을 해주세요. 마인드맵이 만들어진 후 온톨로지가 생성됩니다.")
-            return
         self._mindmap_mode = "graph"
-        if not getattr(self, "_mindmap_data", None):
-            self._mindmap_pending = "graph"
-            self._log.append_log("SYS: 분석 중... 완료되면 온톨로지가 자동으로 열립니다.")
-            return
         self._launch_mindmap_viewer("graph")
 
     def _open_graph_viewer(self):
-        """질의 기반 탐색용: 토글 없이 온톨로지 뷰어를 바로 연다."""
-        if not getattr(self, "_mindmap_data", None):
-            self._mindmap_pending = "graph"
-            self._log.append_log("SYS: 분석 중... 완료되면 온톨로지가 자동으로 열립니다.")
-            return
+        """질의 기반 탐색용: 온톨로지 탭으로 바로 전환."""
         self._mindmap_mode = "graph"
         self._launch_mindmap_viewer("graph")
+
 
     # ── Ctrl+K 명령 팔레트 ────────────────────────────────────────────────
     def _palette_commands(self) -> list:

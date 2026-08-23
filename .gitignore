@@ -108,3 +108,4 @@ memory/long_term_prefs.json
 memory/routines.json
 memory/ab_evaluations.json
 memory/user_settings.json
+external/
