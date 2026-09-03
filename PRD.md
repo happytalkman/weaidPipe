@@ -126,3 +126,45 @@ RLAIF 선호 기록(JSONL) → 위반 패턴 집계 → LLM 보완 조항 제안
 | Phase 3: 웹 대시보드 + WS 실시간 동기화 | ✅ 완료 |
 | 고도화 1~6: 인과추적·요약노드·헌법진화·프로액티브·스케줄·자가진단 | ✅ 완료 |
 | 후보: 모바일 반응형 · 다국어 · 워크플로우 루틴 · A/B 평가 | 📋 백로그 |
+
+## 8. DID 및 Connecting 요구사항
+
+### 연결과 신원
+
+- 사용자는 중앙 계정과 별도로 `did:weaid:<user-id>` 형식의 서비스 DID를 발급받는다.
+- DID는 사용자별 비밀 저장소에 보관하고 메시지 발신자 식별에 사용한다.
+- 호스팅 API의 온톨로지 그래프는 사용자별 저장 경로로 격리한다.
+- 친구 추가는 이메일 대신 친구 DID를 기본 식별자로 사용한다.
+
+### 커넥팅 기능
+
+- DID 기반 친구 추가와 친구 목록 조회
+- 한 명 이상의 참여자가 있는 오픈채팅 스레드 생성
+- 스레드 메시지 저장 및 발신자 DID 표시
+- 음성·영상 통화 세션 시작, 종료, 상태 및 통화 시간 기록
+- 다자간 일정 생성과 참여자 DID 목록 관리
+- 메시지, 통화, 일정, 그래프 커밋 이벤트를 근거 레코드로 조회
+
+현재 API 계약:
+
+| 기능 | API |
+| --- | --- |
+| DID | `GET /identity/did` |
+| 친구 | `POST/GET /connecting/contacts` |
+| 오픈채팅 | `POST /connecting/threads`, `POST/GET /connecting/threads/{id}/messages` |
+| 통화 | `POST /connecting/calls`, `POST /connecting/calls/{id}/end` |
+| 일정 | `POST/GET /connecting/schedule` |
+| 근거 | `GET /connecting/evidence` |
+
+실제 음성·영상 미디어 전송은 WebRTC transport를 사용하며, API 계층은 세션 수명과 감사 근거를 관리한다.
+
+## 9. 온톨로지 커밋 파이프라인
+
+음성 또는 텍스트 턴은 다음 순서로 처리한다.
+
+1. 질문과 답변에서 보수적인 S-P-O 트리플을 제안한다.
+2. predicate, layer, subject, object 제약을 SHACL 스타일 검증기로 검사한다.
+3. 유효한 트리플만 누적 그래프와 마인드맵에 커밋한다.
+4. 거부된 트리플은 오류와 함께 호출자에게 반환해 수정 가능하게 한다.
+
+API: `POST /ontology/propose`

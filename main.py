@@ -3078,13 +3078,25 @@ class JarvisLive:
         print("[AID] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
+        def _safe_put(item):
+            if self.out_queue is None:
+                return
+            try:
+                self.out_queue.put_nowait(item)
+            except asyncio.QueueFull:
+                try:
+                    self.out_queue.get_nowait()
+                    self.out_queue.put_nowait(item)
+                except Exception:
+                    pass
+
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted and not self._hard_stop.is_set():
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
+                    _safe_put,
                     {"data": data, "mime_type": "audio/pcm"}
                 )
 
@@ -3451,7 +3463,7 @@ class JarvisLive:
                     self.session        = session
                     self._loop          = asyncio.get_event_loop()
                     self.audio_in_queue = asyncio.Queue()
-                    self.out_queue      = asyncio.Queue(maxsize=10)
+                    self.out_queue      = asyncio.Queue(maxsize=50)
                     self._turn_done_event = asyncio.Event()
 
                     print("[AID] ✅ Connected.")
@@ -3596,8 +3608,7 @@ def main():
     running_as_app = getattr(sys, "frozen", False)
 
     if os.environ.get("JARVIS_CLI") != "1" and not running_as_app:
-        print("[AID] Please launch with the AID CLI: jarvis")
-        return
+        os.environ["JARVIS_CLI"] = "1"
     if not wait_for_startup_claps():
         return
     print("[AID] ⚡ Powering up the interface...")

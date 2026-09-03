@@ -22,15 +22,30 @@ from memory.memory_manager import format_memory_for_prompt, load_memory
 from .auth import get_current_user, websocket_user
 from .config import settings
 from .database import SessionLocal, get_db, init_db
-from .models import User
+from .models import (
+    CallLog,
+    Contact,
+    ConversationThread,
+    EvidenceRecord,
+    ScheduledEvent,
+    ThreadMessage,
+    User,
+)
 from .rate_limit import limiter
 from .repositories import add_chat_message, recent_chat_messages
 from .schemas import (
+    CallCreate,
+    CallEnd,
     ChatRequest,
     ChatResponse,
+    ContactCreate,
     GeminiKeyRequest,
     LoginRequest,
+    MessageCreate,
+    ScheduleCreate,
     SessionView,
+    ThreadCreate,
+    TripleProposal,
     UserCreate,
     UserView,
 )
@@ -153,13 +168,133 @@ async def record_rlaif_preference(payload: dict[str, Any]) -> dict:
 
 
 @app.get("/ontology/graph")
-def ontology_graph() -> dict:
+def ontology_graph(user: User = Depends(get_current_user)) -> dict:
     """누적 대화 그래프 (온톨로지 대시보드 초기 로드용)."""
     try:
         from core import graph_store
-        return graph_store.load()
+        return graph_store.load_for_user(user.id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/ontology/propose")
+def propose_ontology(payload: TripleProposal, user: User = Depends(get_current_user)) -> dict:
+    """Validate proposed facts before committing them to the mindmap graph."""
+    from core import graph_store
+    from core.shacl_validator import validate_batch
+    from core.triple_extractor import extract_triples_from_turn
+
+    proposals = payload.proposed_triples or extract_triples_from_turn(payload.question, payload.answer)
+    results = validate_batch(proposals)
+    valid = [item["triple"] for item in results if item["valid"]]
+    store = graph_store.load_for_user(user.id)
+    if valid:
+        graph_store.merge_turn(store, payload.question, payload.answer, heur_triples=valid)
+        graph_store.save_for_user(store, user.id)
+    return {
+        "committed": len(valid),
+        "valid_count": len(valid),
+        "validated_triples": valid,
+        "errors": [item for item in results if not item["valid"]],
+    }
+
+
+@app.get("/identity/did")
+def get_did(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    did = get_user_secret(db, user.id, "did")
+    if not did:
+        did = f"did:weaid:{user.id}"
+        set_user_secret(db, user.id, "did", did)
+    return {"did": did, "method": "weaid", "controller": user.id}
+
+
+@app.post("/connecting/contacts", status_code=201)
+def add_contact(payload: ContactCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    existing = db.scalar(select(Contact).where(Contact.user_id == user.id, Contact.friend_did == payload.friend_did))
+    if existing:
+        raise HTTPException(status_code=409, detail="Contact already exists")
+    row = Contact(user_id=user.id, friend_did=payload.friend_did, display_name=payload.display_name)
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "friend_did": row.friend_did, "display_name": row.display_name}
+
+
+@app.get("/connecting/contacts")
+def list_contacts(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(Contact).where(Contact.user_id == user.id).order_by(Contact.created_at.desc())).all()
+    return [{"id": row.id, "friend_did": row.friend_did, "display_name": row.display_name, "created_at": row.created_at.isoformat()} for row in rows]
+
+
+@app.post("/connecting/threads", status_code=201)
+def create_thread(payload: ThreadCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    row = ConversationThread(owner_id=user.id, participant_dids=payload.participant_dids, topic=payload.topic)
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "participant_dids": row.participant_dids, "topic": row.topic}
+
+
+@app.post("/connecting/threads/{thread_id}/messages", status_code=201)
+def post_thread_message(thread_id: str, payload: MessageCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    thread = db.scalar(select(ConversationThread).where(ConversationThread.id == thread_id, ConversationThread.owner_id == user.id))
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    did = get_did(user, db)["did"]
+    row = ThreadMessage(thread_id=thread.id, sender_did=did, content=payload.content)
+    db.add(row)
+    db.add(EvidenceRecord(user_id=user.id, event_type="message", source=thread.id, payload={"sender_did": did, "content": payload.content}))
+    db.commit()
+    return {"id": row.id, "thread_id": row.thread_id, "sender_did": row.sender_did, "content": row.content, "created_at": row.created_at.isoformat()}
+
+
+@app.get("/connecting/threads/{thread_id}/messages")
+def list_thread_messages(thread_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+    thread = db.scalar(select(ConversationThread).where(ConversationThread.id == thread_id, ConversationThread.owner_id == user.id))
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    rows = db.scalars(select(ThreadMessage).where(ThreadMessage.thread_id == thread.id).order_by(ThreadMessage.created_at)).all()
+    return [{"id": row.id, "sender_did": row.sender_did, "content": row.content, "created_at": row.created_at.isoformat()} for row in rows]
+
+
+@app.post("/connecting/schedule", status_code=201)
+def create_schedule(payload: ScheduleCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    row = ScheduledEvent(user_id=user.id, title=payload.title, scheduled_at=payload.scheduled_at, participant_dids=payload.participant_dids)
+    db.add(row)
+    db.add(EvidenceRecord(user_id=user.id, event_type="schedule", source=payload.title, payload={"scheduled_at": payload.scheduled_at.isoformat(), "participant_dids": payload.participant_dids}))
+    db.commit()
+    return {"id": row.id, "title": row.title, "scheduled_at": row.scheduled_at.isoformat(), "status": row.status}
+
+
+@app.get("/connecting/schedule")
+def list_schedule(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(ScheduledEvent).where(ScheduledEvent.user_id == user.id).order_by(ScheduledEvent.scheduled_at)).all()
+    return [{"id": row.id, "title": row.title, "scheduled_at": row.scheduled_at.isoformat(), "participant_dids": row.participant_dids, "status": row.status} for row in rows]
+
+
+@app.get("/connecting/evidence")
+def list_evidence(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(EvidenceRecord).where(EvidenceRecord.user_id == user.id).order_by(EvidenceRecord.created_at.desc()).limit(200)).all()
+    return [{"id": row.id, "event_type": row.event_type, "source": row.source, "payload": row.payload, "created_at": row.created_at.isoformat()} for row in rows]
+
+
+@app.post("/connecting/calls", status_code=201)
+def initiate_call(payload: CallCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    row = CallLog(user_id=user.id, recipient_did=payload.recipient_did, media=payload.media)
+    db.add(row)
+    db.add(EvidenceRecord(user_id=user.id, event_type="call", source=row.id, payload={"recipient_did": payload.recipient_did, "media": payload.media, "status": row.status}))
+    db.commit()
+    return {"id": row.id, "recipient_did": row.recipient_did, "media": row.media, "status": row.status}
+
+
+@app.post("/connecting/calls/{call_id}/end")
+def end_call(call_id: str, payload: CallEnd, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    row = db.scalar(select(CallLog).where(CallLog.id == call_id, CallLog.user_id == user.id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Call not found")
+    row.status = "completed"
+    row.duration_seconds = payload.duration_seconds
+    db.add(EvidenceRecord(user_id=user.id, event_type="call_end", source=row.id, payload={"duration_seconds": row.duration_seconds, "status": row.status}))
+    db.commit()
+    return {"id": row.id, "status": row.status, "duration_seconds": row.duration_seconds}
 
 
 @app.get("/self-improve/status")

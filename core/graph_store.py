@@ -15,6 +15,7 @@ and the ontology shows the accumulated insight.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,32 @@ GRAPH_PATH = BASE_DIR / "memory" / "conversation_graph.json"
 SHARED_PATH = Path(__import__("tempfile").gettempdir()) / "weaid_mindmap_data.json"
 
 _LAYERS = ("semantic", "kinetic", "dynamic")
+
+
+def user_graph_path(user_id: str) -> Path:
+    """Return an isolated graph path for a hosted user."""
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(user_id))[:80]
+    return BASE_DIR / "memory" / "users" / f"{safe_id}.json"
+
+
+def load_for_user(user_id: str) -> dict[str, Any]:
+    path = user_graph_path(user_id)
+    try:
+        if path.exists():
+            store = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(store, dict) and "turns" in store:
+                return store
+    except Exception:
+        pass
+    return new_store()
+
+
+def save_for_user(store: dict[str, Any], user_id: str) -> Path:
+    store["updated"] = datetime.now().isoformat(timespec="seconds")
+    path = user_graph_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
 
 
 def new_store() -> dict[str, Any]:
