@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WEAID Ontology · Mindmap</title>
+<script src="d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg0:#04060c; --bg1:#0a1224; --glass: rgba(13,21,38,.55); --glass2: rgba(9,15,30,.72);
+    --line: rgba(125,225,255,.12); --text:#eaf0ff; --dim:#8b9bc0; --faint:#46557a;
+    --semantic:#4dabf7; --kinetic:#ffb454; --dynamic:#51cf66; --causal:#ff6b6b; --accent:#7ee0ff;
+    --r-lg:16px; --r-md:10px;
+    --shadow: 0 8px 32px rgba(0,0,0,.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; }
+  body {
+    background: radial-gradient(1200px 700px at 50% -10%, #0d1a36 0%, var(--bg0) 55%);
+    color: var(--text);
+    font-family: "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  header {
+    padding: 12px 20px; flex: 0 0 auto; z-index: 5;
+    background: var(--glass); backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin:0; font-size:16px; letter-spacing:.4px; color:var(--accent); }
+  header .q { margin:5px 0 0; font-size:12.5px; color:var(--dim); }
+  header .insight { margin-top:5px; font-size:11.5px; color:#aee9ff; min-height:16px; }
+  .insight-line { margin-right:16px; display:inline-block; animation: rise .5s ease both; }
+  .cursor { animation: blink 1s steps(2) infinite; color: var(--accent); }
+  @keyframes rise { from { opacity:0; transform: translateY(6px);} to { opacity:1; transform:none; } }
+  @keyframes blink { 50% { opacity:0; } }
+  .legend { display:flex; gap:14px; margin-top:7px; font-size:11px; color:var(--dim); flex-wrap:wrap; }
+  .legend i { width:9px; height:9px; border-radius:3px; display:inline-block; margin-right:5px; }
+  main { flex:1 1 auto; position:relative; min-height:0; }
+  .pane { position:absolute; inset:0; display:none; flex-direction:column; }
+  .pane.active { display:flex; }
+  .pane h2 { margin:0; padding:9px 18px; font-size:12px; letter-spacing:1.2px; color:var(--dim);
+    border-bottom:1px solid var(--line); background: rgba(255,255,255,.02); }
+  .pane .hint { padding:4px 18px; font-size:10px; color:var(--faint); border-bottom:1px solid var(--line); }
+  .pane svg { flex:1 1 auto; width:100%; }
+  .node { cursor:pointer; }
+  .node rect { transition: stroke .15s ease; }
+  .node:hover rect { stroke: var(--accent) !important; }
+  .pill text { font-size:12px; fill:var(--text); pointer-events:none; }
+  .pill .cnt { font-size:9px; fill:#5f7099; }
+  .edge { fill:none; stroke-width:1.2; opacity:.55; }
+  .edge.causal { stroke-width:1.9; opacity:.9; }
+  .edge-label { font-size:9px; font-style:italic; pointer-events:none; }
+  .flow-link { fill:none; stroke:#2b3a5e; stroke-width:1.4; }
+  .col-band { opacity:.04; }
+  .col-title { font-size:13px; font-weight:bold; letter-spacing:1.5px; }
+  .dimmed { opacity:.2; }
+  @keyframes spring {
+    0% { transform: scale(.3); opacity:0; }
+    55% { transform: scale(1.14); opacity:1; }
+    100% { transform: scale(1); }
+  }
+  .node.new { animation: spring .55s cubic-bezier(.34,1.56,.64,1) 1; transform-box: fill-box; transform-origin: center; }
+
+  /* ── 우측 인스펙터 (글래스 패널) ── */
+  #inspector {
+    position:absolute; top:10px; right:10px; bottom:10px; width:300px; z-index:20;
+    background: var(--glass2); backdrop-filter: blur(18px);
+    border:1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow);
+    transform: translateX(320px); transition: transform .28s cubic-bezier(.4,0,.2,1);
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  #inspector.open { transform: none; }
+  #inspector .hd { display:flex; align-items:center; padding:12px 14px; border-bottom:1px solid var(--line); }
+  #inspector .hd b { font-size:14px; color:var(--accent); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #inspector .close { cursor:pointer; color:var(--dim); font-size:14px; padding:2px 8px; border-radius:6px; }
+  #inspector .close:hover { color:#fff; background:rgba(255,255,255,.08); }
+  #inspector .bd { flex:1; overflow-y:auto; padding:12px 14px; font-size:12px; }
+  #inspector .bd .row { margin-bottom:10px; }
+  #inspector .bd .k { color:var(--faint); font-size:10px; letter-spacing:1px; text-transform:uppercase; }
+  #inspector .bd .v { margin-top:2px; color:var(--text); line-height:1.5; word-break:break-word; }
+  #inspector .badge { display:inline-block; padding:2px 9px; border-radius:99px; font-size:10px; font-weight:bold; }
+  #inspector .rel { padding:5px 8px; margin-top:4px; border-radius:8px; background:rgba(255,255,255,.03);
+    border:1px solid rgba(125,225,255,.08); font-size:11px; }
+  #inspector .rel b { color:var(--accent); font-weight:600; }
+
+  /* ── 줌 컨트롤 + 미니맵 ── */
+  #zoom-ctrl { position:absolute; right:14px; bottom:14px; z-index:15; display:flex; flex-direction:column; gap:6px; }
+  #zoom-ctrl button {
+    width:34px; height:34px; border-radius:10px; border:1px solid var(--line);
+    background: var(--glass2); backdrop-filter: blur(10px); color:var(--text);
+    font-size:15px; cursor:pointer; transition: background .15s ease;
+  }
+  #zoom-ctrl button:hover { background: rgba(125,225,255,.14); }
+  #minimap-wrap {
+    position:absolute; left:14px; bottom:14px; z-index:15; width:170px; height:110px;
+    background: var(--glass2); backdrop-filter: blur(10px);
+    border:1px solid var(--line); border-radius: var(--r-md); overflow:hidden; opacity:.92;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>WEAID · 온톨로지 / 대화 마인드맵</h1>
+  <div class="q" id="question"></div>
+  <div class="insight" id="insight"></div>
+  <div class="legend">
+    <span><i style="background:var(--semantic)"></i>시멘틱 S</span>
+    <span><i style="background:var(--kinetic)"></i>키네틱 K</span>
+    <span><i style="background:var(--dynamic)"></i>다이나믹 D</span>
+    <span><i style="background:var(--causal)"></i>인과</span>
+  </div>
+</header>
+<main>
+  <section class="pane active" id="pane-mm">
+    <h2>대화 흐름 마인드맵 — Q → A</h2>
+    <div class="hint">질문(노랑) → 답변(파랑) · 노드 클릭 → 인스펙터 · 더블클릭 접기/펼치기 · 휠 → 확대</div>
+    <svg id="mindmap"></svg>
+  </section>
+  <section class="pane" id="pane-kg">
+    <h2>온톨로지 — SKD 3계층 × 노드·링크·엣지</h2>
+    <div class="hint">3개 기둥 = S/K/D · 화살표 = 관계 · 빨강 = 인과 · 노드 클릭 → 인스펙터 · 휠 → 확대</div>
+    <svg id="kgraph"></svg>
+  </section>
+</main>
+<aside id="inspector">
+  <div class="hd"><b id="ins-title"></b><span class="close" id="ins-close">✕</span></div>
+  <div class="bd" id="ins-body"></div>
+</aside>
+<div id="zoom-ctrl">
+  <button id="z-plus" title="확대">+</button>
+  <button id="z-minus" title="축소">−</button>
+  <button id="z-fit" title="전체 보기">⛶</button>
+</div>
+<div id="minimap-wrap"><svg id="minimap" width="170" height="110"></svg></div>
+
+<script>
+const COLORS = { semantic:"#4dabf7", kinetic:"#ffb454", dynamic:"#51cf66" };
+const LAYER_KO = { semantic:"시멘틱 S · 무엇인가", kinetic:"키네틱 K · 무엇을 하는가", dynamic:"다이나믹 D · 어떻게 변하는가" };
+const LINE_H = 15, PAD = 8, MAX_NODES_PER_LAYER = 10, MAX_FLOW_PAIRS = 6;
+
+function el(id){ return document.getElementById(id); }
+function fit(svg){ const r = svg.node().getBoundingClientRect(); return { w: Math.max(r.width, 320), h: Math.max(r.height, 260) }; }
+function short(s,n){ s=String(s==null?"":s).trim(); return s.length>n ? s.slice(0,n)+"…" : s; }
+function wrapText(text,maxChars){
+  text=String(text==null?"":text).trim();
+  if(!text) return [""];
+  if(text.length<=maxChars) return [text];
+  const words=text.split(/\s+/);
+  if(words.length>1){
+    const lines=[]; let cur="";
+    for(const w of words){ if((cur+" "+w).trim().length>maxChars && cur){ lines.push(cur.trim()); cur=w; } else cur=(cur+" "+w).trim(); }
+    if(cur) lines.push(cur.trim());
+    return lines;
+  }
+  const lines=[];
+  for(let i=0;i<text.length;i+=maxChars) lines.push(text.slice(i,i+maxChars));
+  return lines;
+}
+function setMode(m){
+  document.getElementById("pane-mm").classList.toggle("active", m==="mindmap");
+  document.getElementById("pane-kg").classList.toggle("active", m==="graph");
+}
+
+// ── 줌/미니맵 상태 ──
+const Z = { svg:null, g:null, behavior:null, fit:null, mini:null, mode:null };
+function makeZoom(svg, g, fitFn, mini){
+  const b = d3.zoom().scaleExtent([0.3,3]).on("zoom", e => { g.attr("transform", e.transform); drawMiniRect(); });
+  svg.call(b).on("dblclick.zoom", null);
+  Z.svg=svg; Z.g=g; Z.behavior=b; Z.fit=fitFn; Z.mini=mini; Z.mode=mini.mode;
+}
+function zoomBy(k){ if(Z.svg && Z.behavior) Z.behavior.scaleBy(Z.svg, k); }
+function zoomFit(){ if(Z.fit) Z.fit(); }
+function drawMiniRect(){
+  if(!Z.mini || !Z.svg || !Z.behavior) return;
+  const m = Z.mini;
+  const svg = d3.select("#minimap");
+  svg.selectAll(".vp").remove();
+  const t = d3.zoomTransform(Z.svg.node());
+  const { w, h } = fit(d3.select(Z.svg.node().parentNode).select(Z.svg.node().nodeName));
+  const vx = -t.x/t.k, vy = -t.y/t.k, vw = m.w/t.k, vh = m.h/t.k;
+  const sx = m.scale, ox = m.ox, oy = m.oy;
+  svg.append("rect").attr("class","vp")
+    .attr("x", ox+vx*sx).attr("y", oy+vy*sx).attr("width", vw*sx).attr("height", vh*sx)
+    .attr("fill","none").attr("stroke","#7ee0ff").attr("stroke-opacity",.7).attr("stroke-width",1);
+}
+
+// ── 인스펙터 ──
+window.__INS_DATA = null;
+function showInspector(label){
+  const data = window.__INS_DATA || {};
+  const rels = (data.relations||[]).filter(r => r.source===label || r.target===label).slice(0,12);
+  const ent = (data.entities||[]).find(e => e.label===label) || {};
+  const turns = (data.turns||[]).filter(t => t.text && t.text.includes(label)).slice(0,3);
+  const layer = ent.layer || "semantic";
+  el("ins-title").textContent = label;
+  let html = "";
+  html += '<div class="row"><div class="k">레이어</div><div class="v"><span class="badge" style="background:'+hexA(COLORS[layer],.18)+';color:'+COLORS[layer]+'">'+(LAYER_KO[layer]||layer)+'</span></div></div>';
+  html += '<div class="row"><div class="k">종류</div><div class="v">'+(ent.kind||"concept")+' · 등장 '+(ent.count||1)+'회</div></div>';
+  if (rels.length){
+    html += '<div class="row"><div class="k">연결 관계 ('+rels.length+')</div>';
+    rels.forEach(r => {
+      const causal = r.kind==="causal";
+      html += '<div class="rel">'+esc(r.source===label ? r.target : r.source)+' <b style="color:'+(causal?'#ff6b6b':'#7ee0ff')+'">'+(causal?'—인과→':'—'+esc(r.label)+'→')+'</b> '+(r.source===label?'나':r.source)+'</div>';
+    });
+    html += '</div>';
+  }
+  if (turns.length){
+    html += '<div class="row"><div class="k">관련 대화</div>';
+    turns.forEach(t => { html += '<div class="rel">['+(t.speaker==="user"?"질문":"답변")+'] '+esc(short(t.text,70))+'</div>'; });
+    html += '</div>';
+  }
+  el("ins-body").innerHTML = html;
+  el("inspector").classList.add("open");
+}
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function hexA(hex,a){ return hex + Math.round(a*255).toString(16).padStart(2,"0"); }
+el("ins-close").addEventListener("click", () => el("inspector").classList.remove("open"));
+el("z-plus").addEventListener("click", () => zoomBy(1.3));
+el("z-minus").addEventListener("click", () => zoomBy(0.77));
+el("z-fit").addEventListener("click", zoomFit);
+
+// ── 헤더: 타이핑 인사이트 스트림 ──
+function updateHeader(data, focus){
+  el("question").textContent = "Q. " + (data.question || "(대화 없음)");
+  const parts = [];
+  if (focus && focus.matched && focus.matched.length){
+    parts.push('🔍 "' + focus.term + '" — ' + focus.matched.length + "개 노드 중심");
+  } else {
+    const causal = (data.relations||[]).filter(r=>r.kind==="causal");
+    if (causal.length){ const c=causal[causal.length-1]; parts.push("💡 인과: " + c.source + " → " + c.target); }
+    const fresh = (data.entities||[]).filter(e=>e.new);
+    if (fresh.length) parts.push("✨ 신규: " + fresh.slice(0,3).map(e=>e.label).join(", "));
+  }
+  parts.push("턴 " + ((data.turns||[]).length/2|0) + " · 주제 " + (data.topics||[]).length + " · 요약 " + ((data.summaries||[]).length));
+  const ins = el("insight"); ins.innerHTML = "";
+  parts.forEach((t,i) => {
+    const s = document.createElement("span"); s.className="insight-line";
+    s.style.animationDelay = (i*0.35)+"s"; s.textContent = t; ins.appendChild(s);
+  });
+  const cur = document.createElement("span"); cur.className="cursor"; cur.textContent="▌";
+  ins.appendChild(cur);
+}
+
+// ══════════════ 마인드맵: 대화 흐름 (Q→A) ══════════════
+function topicChips(data, answerText){
+  const labels = [];
+  (data.topics||[]).forEach(t => {
+    (t.objects||[]).forEach(o => {
+      if (o.object && answerText.includes(o.object) && !labels.includes(o.object)) labels.push(o.object);
+    });
+  });
+  return labels.slice(0,3);
+}
+function buildFlow(data){
+  const turns = data.turns||[];
+  const pairs = [];
+  for (let i=0;i<turns.length;i++){
+    if (turns[i].speaker==="user"){
+      const a = turns.find(t => t.seq===turns[i].seq+1 && t.speaker==="assistant");
+      pairs.push({ q:turns[i], a:a||null });
+    }
+  }
+  const recent = pairs.slice(-MAX_FLOW_PAIRS);
+  const branches = recent.map((p,i) => ({
+    name: "Q" + (pairs.length-recent.length+i+1) + ": " + short(p.q.text, 38),
+    q: true, full: p.q.text,
+    children: p.a ? [{ name: "A: " + short(p.a.text, 60), a: true, full: p.a.text, chips: topicChips(data, p.a.text) }] : []
+  }));
+  // 대화 요약 노드 브랜치 (자동 압축)
+  const summaries = data.summaries || [];
+  if (summaries.length){
+    branches.push({
+      name: "대화 요약", flow: true,
+      children: summaries.slice(-4).map(s => ({
+        name: "요약 " + s.start_turn + "~" + s.end_turn + ": " + short(s.summary || "", 46),
+        leaf: true, flow: true,
+        full: "📝 " + (s.summary || "") + "\n주제: " + (s.key_topics||[]).join(", ") + "\n인사이트: " + (s.key_insights||[]).join(" · "),
+        chips: s.key_topics
+      }))
+    });
+  }
+  return {
+    name: (turns.length ? "WEAID 대화" : (data.question||"대화")),
+    children: branches
+  };
+}
+function drawMindmap(data){
+  const svg = d3.select("#mindmap");
+  svg.selectAll("*").remove();
+  const { w, h } = fit(svg);
+  updateHeader(data);
+  window.__INS_DATA = data;
+
+  const root = d3.hierarchy(buildFlow(data));
+  root.descendants().forEach(d => { d._children = d.children; });
+  const tree = d3.tree().size([h-40, Math.max(w-300, 300)]);
+  tree(root);
+  const minX = d3.min(root.descendants(), d=>d.x), maxX = d3.max(root.descendants(), d=>d.x);
+  root.descendants().forEach(d => d.x -= (minX+maxX)/2 - (h-40)/2);
+
+  const g = svg.append("g").attr("transform","translate(150,20)");
+
+  function redraw(){
+    tree(root);
+    const links = g.selectAll(".flow-link").data(root.links(), d => d.target.data.name);
+    links.join("path").attr("class","flow-link")
+      .attr("d", d => { const sy=d.source.y, ty=d.target.y; return `M${sy},${d.source.x}C${(sy+ty)/2},${d.source.x} ${(sy+ty)/2},${d.target.x} ${ty},${d.target.x}`; });
+
+    const nodes = g.selectAll(".node").data(root.descendants(), d => d.data.name);
+    const ng = nodes.join("g").attr("class", d => "node " + (d.data.q ? "q-card" : "a-card"))
+      .attr("transform", d => `translate(${d.y},${d.x})`)
+      .on("click", (e,d) => { showInspector(d.data.full || d.data.name); })
+      .on("dblclick", (e,d) => {
+        if(d.children) { d._children=d.children; d.children=null; }
+        else if(d._children) { d.children=d._children; d._children=null; }
+        redraw();
+      });
+    ng.selectAll("*").remove();
+    ng.each(function(d){
+      const el = d3.select(this);
+      const isRoot = d.depth === 0;
+      const lines = wrapText(d.data.name, isRoot ? 20 : (d.data.q ? 30 : 44));
+      const cw = Math.max(...lines.map(l => l.length)) * 7.2 + PAD*2;
+      const ch = lines.length * LINE_H + PAD*2;
+      el.append("rect").attr("x",-cw/2).attr("y",-ch/2)
+        .attr("width",cw).attr("height",ch).attr("rx", isRoot ? 14 : 10)
+        .attr("fill", isRoot ? "rgba(10,20,40,.6)" : (d.data.q ? "rgba(20,16,8,.55)" : "rgba(10,20,40,.6)"))
+        .attr("stroke", isRoot ? "#7ee0ff" : (d.data.q ? "#8a6d3b" : "#33415f"))
+        .attr("stroke-width", isRoot ? 1.8 : 1.1);
+      const tx = el.append("text").attr("text-anchor","middle")
+        .attr("fill", isRoot ? "#7ee0ff" : (d.data.q ? "#ffd27f" : "#c6d2f0"));
+      lines.forEach((ln,i) => tx.append("tspan").attr("x",0).attr("y",(i-(lines.length-1)/2)*LINE_H+4).text(ln));
+      if (d.data.chips && d.data.chips.length){
+        el.append("text").attr("class","topic-chip")
+          .attr("x", cw/2 + 6).attr("y", -ch/2 + 9).attr("font-size",9)
+          .attr("fill","#8b9bc0").text("← " + d.data.chips.map(c=>short(c,12)).join(" · "));
+      }
+      if (d._children && !d.children) el.append("circle").attr("r",3).attr("cx",cw/2+6).attr("cy",0).attr("fill","#8b9bc0");
+    });
+  }
+  redraw();
+
+  const mini = { mode:"mindmap", w, h, scale: 1, ox: 8, oy: 8 };
+  makeZoom(svg, g, () => svg.call(Z.behavior.transform, d3.zoomIdentity), mini);
+  drawMini(root, mini);
+}
+
+// ── 미니맵 ──
+function drawMini(rootOrPos, mini){
+  const svg = d3.select("#minimap");
+  svg.selectAll("*").remove();
+  let pts = [];
+  if (mini.mode === "mindmap"){
+    rootOrPos.descendants().forEach(d => pts.push({ x: d.y + 150, y: d.x + 20, c: d.data.q ? "#ffd27f" : "#7ee0ff" }));
+  } else {
+    const vals = rootOrPos instanceof Map ? Array.from(rootOrPos.values()) : Object.values(rootOrPos);
+    vals.forEach(p => pts.push({ x: p.x, y: p.y, c: COLORS[p.layer || "semantic"] || "#7ee0ff" }));
+  }
+  if (!pts.length) return;
+  const xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+  const minx = Math.min(...xs)-40, maxx = Math.max(...xs)+40, miny = Math.min(...ys)-30, maxy = Math.max(...ys)+30;
+  const mw = 154, mh = 94;
+  const scale = Math.min(mw/(maxx-minx||1), mh/(maxy-miny||1));
+  const ox = (mw - (maxx-minx)*scale)/2 - minx*scale;
+  const oy = (mh - (maxy-miny)*scale)/2 - miny*scale;
+  mini.scale = scale; mini.ox = ox; mini.oy = oy;
+  svg.selectAll("circle").data(pts).join("circle")
+    .attr("cx", d => ox + d.x*scale).attr("cy", d => oy + d.y*scale)
+    .attr("r", 2.2).attr("fill", d => d.c).attr("fill-opacity",.85);
+  drawMiniRect();
+}
+
+// ══════════════ 온톨로지: SKD 3기둥 ══════════════
+function prepareOntology(data, focus){
+  const focusSet = new Set((focus && focus.matched) || []);
+  const layers = { semantic:[], kinetic:[], dynamic:[] };
+  (data.entities||[]).forEach(e => {
+    const l = layers[e.layer] || layers.semantic;
+    l.push({ label:e.label, kind:e.kind, layer:e.layer, count:e.count||1, isNew:!!e.new, matched:focusSet.has(e.label) });
+  });
+  const visible = {};
+  Object.keys(layers).forEach(k => {
+    layers[k].sort((a,b)=>(b.count||0)-(a.count||0));
+    layers[k] = layers[k].slice(0, MAX_NODES_PER_LAYER);
+    layers[k].forEach(e => visible[e.label]=e);
+  });
+  const links = (data.relations||[])
+    .filter(r => visible[r.source] && visible[r.target] && r.source !== r.target)
+    .slice(0, 70)
+    .map(r => ({ source: visible[r.source], target: visible[r.target], label: r.label, kind: r.kind, layer: r.layer }));
+  return { layers, links, focusSet, focusActive: focusSet.size > 0 };
+}
+
+function drawGraph(data, focus){
+  const svg = d3.select("#kgraph");
+  svg.selectAll("*").remove();
+  const { w, h } = fit(svg);
+  updateHeader(data, focus);
+  window.__INS_DATA = data;
+
+  const prep = prepareOntology(data, focus);
+  const colX = { semantic: w*0.18, kinetic: w*0.5, dynamic: w*0.82 };
+  const nodePos = new Map();
+
+  Object.keys(colX).forEach(k => {
+    const x = colX[k];
+    svg.append("rect").attr("class","col-band")
+      .attr("x", x-130).attr("y", 44).attr("width", 260).attr("height", h-50)
+      .attr("fill", COLORS[k]).attr("rx",16);
+    svg.append("text").attr("class","col-title")
+      .attr("x", x).attr("y", 26).attr("text-anchor","middle")
+      .attr("fill", COLORS[k]).text(LAYER_KO[k]);
+    svg.append("text").attr("x", x).attr("y", 40).attr("text-anchor","middle")
+      .attr("font-size",9).attr("fill","#5f7099").text(prep.layers[k].length + " 노드");
+  });
+
+  const g = svg.append("g");
+
+  const defs = svg.append("defs");
+  defs.append("marker").attr("id","arr").attr("viewBox","0 -5 10 10")
+    .attr("refX",24).attr("refY",0).attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
+    .append("path").attr("d","M0,-5L10,0L0,5").attr("fill","#8b9bc0");
+  defs.append("marker").attr("id","arr-c").attr("viewBox","0 -5 10 10")
+    .attr("refX",24).attr("refY",0).attr("markerWidth",6.5).attr("markerHeight",6.5).attr("orient","auto")
+    .append("path").attr("d","M0,-5L10,0L0,5").attr("fill","#ff6b6b");
+
+  const nodes = g.append("g").selectAll(".node")
+    .data(Object.values(prep.layers).flat())
+    .join("g").attr("class", d => "node pill" + (d.isNew ? " new" : "") + (prep.focusActive && !d.matched ? " dimmed" : ""));
+
+  nodes.each(function(d){
+    const k = d.layer || "semantic";
+    const x = colX[k];
+    const y = 84 + prep.layers[k].indexOf(d) * 64;
+    nodePos.set(d.label, {x, y, layer:k});
+    const el = d3.select(this).attr("transform", `translate(${x},${y})`);
+    const label = short(d.label, 16);
+    const cw = Math.max(40, label.length * 7.2 + 16);
+    el.append("rect").attr("x",-cw/2).attr("y",-14).attr("width",cw).attr("height",28).attr("rx",10)
+      .attr("fill", d.matched ? "rgba(18,48,71,.7)" : "rgba(13,21,38,.55)")
+      .attr("stroke", d.matched ? "#ffffff" : COLORS[k])
+      .attr("stroke-width", d.matched ? 2 : 1.1);
+    el.append("text").attr("text-anchor","middle").attr("y",4).text(label);
+    if ((d.count||1) > 1) el.append("text").attr("class","cnt").attr("x",cw/2-5).attr("y",-2).attr("text-anchor","end").text("×"+d.count);
+    if (d.matched){
+      el.append("rect").attr("x",-cw/2-5).attr("y",-19).attr("width",cw+10).attr("height",38).attr("rx",12)
+        .attr("fill","none").attr("stroke","#7ee0ff").attr("stroke-width",1.5).attr("stroke-dasharray","3 3");
+    }
+    el.on("click", (e,dd) => showInspector(dd.label));
+    el.append("title").text(d.label);
+  });
+
+  const edges = g.append("g").selectAll(".edge").data(prep.links).join("path")
+    .attr("class", d => "edge" + (d.kind==="causal" ? " causal" : ""))
+    .attr("stroke", d => d.kind==="causal" ? "#ff6b6b" : (COLORS[d.layer] || "#33415f"))
+    .attr("marker-end", d => d.kind==="causal" ? "url(#arr-c)" : "url(#arr)")
+    .attr("d", d => {
+      const s = nodePos.get(d.source.label), t = nodePos.get(d.target.label);
+      if (!s || !t) return "";
+      const sameCol = Math.abs(s.x - t.x) < 5;
+      if (sameCol){
+        const mid = (s.y + t.y)/2;
+        return `M${s.x},${s.y + (t.y>s.y?14:-14)}C${s.x+40},${mid} ${t.x+40},${mid} ${t.x},${t.y + (t.y>s.y?-14:14)}`;
+      }
+      const cx = (s.x + t.x)/2;
+      return `M${s.x + (t.x>s.x?56:-56)},${s.y}C${cx},${s.y} ${cx},${t.y} ${t.x + (t.x>s.x?-56:56)},${t.y}`;
+    });
+
+  g.append("g").selectAll(".edge-label").data(prep.links).join("text")
+    .attr("class","edge-label")
+    .attr("fill", d => d.kind==="causal" ? "#ff8f8f" : "#aab6d6")
+    .attr("text-anchor","middle")
+    .attr("x", d => {
+      const s = nodePos.get(d.source.label), t = nodePos.get(d.target.label);
+      return s && t ? (s.x + t.x)/2 + (Math.abs(s.x-t.x)<5 ? 30 : 0) : 0;
+    })
+    .attr("y", d => {
+      const s = nodePos.get(d.source.label), t = nodePos.get(d.target.label);
+      return s && t ? (s.y + t.y)/2 - 4 : 0;
+    })
+    .text(d => short(d.label, 14));
+
+  const mini = { mode:"graph", w, h, scale:1, ox:8, oy:8 };
+  makeZoom(svg, g, () => svg.call(Z.behavior.transform, d3.zoomIdentity), mini);
+  drawMini(nodePos, mini);
+}
+
+function renderMindmap(data){
+  data = data || { turns:[], topics:[] };
+  setMode("mindmap");
+  drawMindmap(data);
+}
+function renderGraph(data, focus){
+  data = data || { entities:[], relations:[] };
+  focus = focus || {};
+  window.__FULL_DATA = data;
+  setMode("graph");
+  drawGraph(data, focus);
+}
+if (window.MINDMAP_DATA) renderMindmap(window.MINDMAP_DATA);
+
+// ── 대시보드(부모 창)와의 postMessage 브리지 (웹 동기화) ──
+window.addEventListener("message", (e) => {
+  const d = e.data;
+  if (!d || typeof d !== "object") return;
+  if (d.type === "graph") {
+    renderMindmap(d.data || {});
+  } else if (d.type === "focus") {
+    // D1: 웹 검색 포커스 — 서브그래프 중심 재렌더
+    if (d.focus && d.focus.matched && d.focus.matched.length) {
+      renderGraph(window.__FULL_DATA || d.focus, d.focus);
+    }
+  } else if (d.type === "mode") {
+    if (d.mode === "graph") renderGraph(d.data || window.__FULL_DATA || {});
+    else renderMindmap(d.data || {});
+  }
+});
+</script>
+</body>
+</html>

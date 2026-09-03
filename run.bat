@@ -1,4 +1,6 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 set PYTHONUTF8=1
 echo [WEAID] Starting WEAID Voice Assistant at http://localhost:7860...
 if exist "%USERPROFILE%\.local\bin\uv.exe" (

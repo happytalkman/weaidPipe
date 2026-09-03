@@ -1,0 +1,26 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 현재 단위 테스트는 표준 라이브러리만 사용한다.
+      # (무거운 의존성이 필요한 테스트를 추가할 경우 여기에 설치 단계를 둔다)
+      - name: Unit tests
+        run: python -m unittest tests.test_scheduler tests.test_proactive tests.test_diagnosis tests.test_bots tests.test_hologram tests.test_voice_profile tests.test_minutes tests.test_alarms tests.test_reporter tests.test_group1_ux tests.test_group2_agents tests.test_group3_intelligence tests.test_group4_platform tests.test_backlog6 tests.test_rank1_stability tests.test_rank2_intent tests.test_rank3_knowledge -v

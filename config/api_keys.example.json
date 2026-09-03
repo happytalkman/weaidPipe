@@ -1,0 +1,8 @@
+{
+  "os_system": "mac",
+  "voice_name": "charon",
+  "live_model": "models/gemini-2.0-flash-live-preview-04-09",
+  "tts_provider": "gemini",
+  "tts_voice_id": "charon",
+  "camera_index": 0
+}

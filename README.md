@@ -13,7 +13,7 @@ WEAID(에이드)는 Pipecat 기반의 한국어 실시간 음성·멀티모달 A
 
 ### 환경 설정
 
-프로젝트 루트에 `.env` 파일을 만들고 필요한 API 키를 설정합니다. 키 이름과 서비스 설정은 `env.example`을 참고하세요.
+프로젝트 루트에 `.env` 파일을 만들고 필요한 API 키를 설정합니다. 키 이름과 서비스 설정은 `.env.example`을 참고하세요.
 
 ### 실행
 
@@ -46,6 +46,11 @@ uv run python bot_weaid.py -t webrtc --port 7860
 - 실시간 자막 SSE API: `/api/transcripts`, `/api/transcripts/history`
 - WEAID 상태와 현재 시간 조회를 위한 function calling
 - 회의 보조 기능과 온톨로지 그래프 연동
+- DID 기반 사용자·친구·오픈채팅·통화·일정 API
+- SHACL 검증을 거친 개인 온톨로지 지식 그래프
+- 기존 WEAID 데스크톱 앱, 에이전트, 자동화 및 웹 콘솔
+
+기존 데스크톱 앱은 `main.py`, 호스팅 API는 `api/server.py`, Pipecat 기반 실시간 음성 앱은 `bot_weaid.py`에서 시작합니다. 기본 실행 스크립트는 실시간 음성 앱을 실행합니다.
 
 ## 프로젝트 문서
 

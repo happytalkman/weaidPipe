@@ -78,3 +78,36 @@ whisker_setup.py
 *.pem
 # Release-eval run artifacts (logs and conversation recordings)
 scripts/release-evals/test-runs/
+
+# WEAID local configuration, credentials, and runtime data
+config/api_keys.json
+config/ui_settings.json
+config/layout_settings.json
+config/.intro_voice_cache/
+config/gmail_credentials.json
+config/credentials.json
+credentials.json
+client_secret_*.json
+token.json
+memory/long_term.json
+memory/task_history.json
+memory/conversation_graph.json
+memory/sessions/
+memory/constitution_evolution.json
+memory/bots.json
+memory/voice_profiles.json
+memory/alarms.json
+memory/scheduled_tasks.json
+memory/long_term_prefs.json
+memory/routines.json
+memory/ab_evaluations.json
+memory/user_settings.json
+exports/
+external/
+tmp/
+outputs/
+*.db
+*.sqlite
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo

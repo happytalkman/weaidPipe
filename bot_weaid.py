@@ -17,8 +17,8 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from loguru import logger
 
-# Add parent dir (weaid root) to sys.path
-WEAID_ROOT = Path(__file__).resolve().parent.parent
+# Resolve the merged WEAID root from this entry point.
+WEAID_ROOT = Path(__file__).resolve().parent
 if str(WEAID_ROOT) not in sys.path:
     sys.path.insert(0, str(WEAID_ROOT))
 
