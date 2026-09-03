@@ -72,10 +72,20 @@ try:
         VirtualSpeakerDevice,
     )
     from daily import LogLevel as DailyLogLevel
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error('In order to use the Daily transport, you need to `uv add "pipecat-ai[daily]"`.')
-    raise ImportError(f"Missing module: {e}") from e
+    DAILY_AVAILABLE = True
+except ModuleNotFoundError:
+    DAILY_AVAILABLE = False
+    AudioData = Any
+    CallClient = Any
+    CustomAudioSource = Any
+    CustomAudioTrack = Any
+    CustomVideoSource = Any
+    CustomVideoTrack = Any
+    Daily = Any
+    EventHandler = object
+    VideoFrame = Any
+    VirtualSpeakerDevice = Any
+    DailyLogLevel = Any
 
 VAD_RESET_PERIOD_MS = 2000
 
@@ -2358,6 +2368,11 @@ class DailyTransport(BaseTransport):
             input_name: Optional name for the input transport.
             output_name: Optional name for the output transport.
         """
+        if not DAILY_AVAILABLE:
+            raise ImportError(
+                'In order to use the Daily transport, you need the "daily" package. '
+                'Note that daily-python is not supported on Windows; please use WebRTC or WebSocket transport.'
+            )
         super().__init__(input_name=input_name, output_name=output_name)
 
         callbacks = DailyCallbacks(

@@ -1,3 +1,63 @@
+<h1>WEAID PipeAId</h1>
+
+WEAID(에이드)는 Pipecat 기반의 한국어 실시간 음성·멀티모달 AI 어시스턴트입니다. Gemini Live와 WebRTC를 연결해 브라우저에서 음성으로 대화하고, 실시간 자막과 온톨로지 그래프 이벤트를 제공합니다.
+
+## 빠른 시작
+
+### 요구 사항
+
+- Windows 또는 macOS/Linux
+- Python 3.11 이상
+- `uv`
+- Gemini API 키
+
+### 환경 설정
+
+프로젝트 루트에 `.env` 파일을 만들고 필요한 API 키를 설정합니다. 키 이름과 서비스 설정은 `env.example`을 참고하세요.
+
+### 실행
+
+PowerShell:
+
+```powershell
+.\\run.ps1
+```
+
+Windows CMD:
+
+```bat
+run.bat
+```
+
+수동 실행:
+
+```powershell
+$env:PYTHONUTF8 = "1"
+uv run python bot_weaid.py -t webrtc --port 7860
+```
+
+브라우저에서 [http://localhost:7860](http://localhost:7860)을 열고 마이크 권한을 허용한 뒤 연결합니다.
+
+## 주요 기능
+
+- Gemini Live 기반 양방향 음성 대화와 사용자 발화 중단 처리
+- WebRTC 브라우저 transport 및 실시간 음성 스트리밍
+- 한국어 존댓말 중심의 WEAID 페르소나
+- 실시간 자막 SSE API: `/api/transcripts`, `/api/transcripts/history`
+- WEAID 상태와 현재 시간 조회를 위한 function calling
+- 회의 보조 기능과 온톨로지 그래프 연동
+
+## 프로젝트 문서
+
+- [제품 요구사항 문서](PRD.md)
+- [상세 WEAID 안내](WEAID_README.md)
+
+## 저장소
+
+본 프로젝트의 공식 저장소는 [happytalkman/weaidPipe](https://github.com/happytalkman/weaidPipe)입니다.
+
+---
+
 <h1><div align="center">
  <img alt="pipecat" width="300px" height="auto" src="https://raw.githubusercontent.com/pipecat-ai/pipecat/main/pipecat.png">
 </div></h1>
